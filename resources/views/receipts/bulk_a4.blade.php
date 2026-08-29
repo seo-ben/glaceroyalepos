@@ -90,12 +90,12 @@
                     <div class="totals-wrapper">
                         <table class="totals-table">
                             <tr>
-                                <td>Sous-total</td>
+                                <td>Sous-total (TTC)</td>
                                 <td style="text-align: right;">{{ number_format($order->subtotal, 0, ',', ' ') }} FCFA</td>
                             </tr>
                             @if($order->discount_amount > 0)
                                 <tr>
-                                    <td>Remise ({{ $order->discount_reason }})</td>
+                                    <td>{{ $order->discount_reason ?: 'REMISE' }}</td>
                                     <td style="text-align: right;">-{{ number_format($order->discount_amount, 0, ',', ' ') }} FCFA</td>
                                 </tr>
                             @endif
@@ -104,7 +104,7 @@
                                 <td style="text-align: right;">{{ number_format($order->vat_amount, 0, ',', ' ') }} FCFA</td>
                             </tr>
                             <tr class="total-row">
-                                <td>TOTAL</td>
+                                <td>TOTAL NET (TTC)</td>
                                 <td style="text-align: right;">{{ number_format($order->total, 0, ',', ' ') }} FCFA</td>
                             </tr>
                         </table>

@@ -33,7 +33,8 @@ class CategoryController extends Controller
             'image'       => 'nullable|image|max:2048',
             'order'       => 'integer|min:0',
             'destination' => 'nullable|in:kitchen,bar,pizza',
-            'color'       => 'nullable|string|max:20'
+            'color'       => 'nullable|string|max:20',
+            'is_promo_exempt' => 'nullable|boolean'
         ]);
 
         $imagePath = null;
@@ -49,6 +50,7 @@ class CategoryController extends Controller
             'order'         => $request->order ?? 0,
             'destination'   => $request->destination ?? 'kitchen',
             'color'         => $request->color,
+            'is_promo_exempt' => $request->boolean('is_promo_exempt', false),
         ]);
 
         return response()->json($category, 201);
@@ -65,6 +67,7 @@ class CategoryController extends Controller
             'active'      => 'nullable',
             'destination' => 'nullable|in:kitchen,bar,pizza',
             'color'       => 'nullable|string|max:20',
+            'is_promo_exempt' => 'nullable'
         ]);
 
         if ($request->hasFile('image')) {
@@ -72,7 +75,7 @@ class CategoryController extends Controller
             $request->merge(['image' => $request->file('image')->store("restaurants/{$category->restaurant_id}/categories", 'public')]);
         }
 
-        $category->update($request->only(['name', 'parent_id', 'order', 'active', 'image', 'destination', 'color']));
+        $category->update($request->only(['name', 'parent_id', 'order', 'active', 'image', 'destination', 'color', 'is_promo_exempt']));
         return response()->json($category);
     }
 

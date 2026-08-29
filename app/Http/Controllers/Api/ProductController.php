@@ -113,24 +113,36 @@ class ProductController extends Controller
         abort_unless($request->user()->isManager(), 403, 'Manager requis.');
 
         $request->validate([
-            'name'        => 'sometimes|string|max:200',
-            'price'       => 'sometimes|numeric|min:0',
-            'available'   => 'nullable',
-            'track_stock' => 'nullable',
-            'quantity'    => 'sometimes|numeric|min:0',
-            'min_quantity'=> 'sometimes|numeric|min:0',
-            'category_id' => 'sometimes|exists:categories,id',
-            'image'       => 'nullable|sometimes|image|max:2048',
-            'emoji'       => 'nullable|string|max:20',
+            'name'           => 'sometimes|string|max:200',
+            'price'          => 'sometimes|numeric|min:0',
+            'available'      => 'nullable',
+            'track_stock'    => 'nullable',
+            'quantity'       => 'sometimes|numeric|min:0',
+            'min_quantity'   => 'sometimes|numeric|min:0',
+            'category_id'    => 'sometimes|exists:categories,id',
+            'image'          => 'nullable|sometimes|image|max:2048',
+            'emoji'          => 'nullable|string|max:20',
+            'modifier_groups' => 'nullable|array',
+            'modifier_groups.*.name'     => 'required|string',
+            'modifier_groups.*.required' => 'nullable',
+            'modifier_groups.*.multiple' => 'nullable',
+            'modifier_groups.*.modifiers' => 'array',
+            'modifier_groups.*.modifiers.*.name'        => 'required|string',
+            'modifier_groups.*.modifiers.*.extra_price' => 'numeric|min:0',
         ]);
 
         $data = $request->only([
             'name', 'description', 'price', 'cost_price', 'vat_rate',
-            'category_id', 'order', 'emoji'
+            'category_id', 'order', 'emoji', 'quantity', 'min_quantity'
         ]);
 
         if ($request->has('available'))   $data['available'] = $request->boolean('available');
         if ($request->has('track_stock')) $data['track_stock'] = $request->boolean('track_stock');
+        if ($request->has('quantity')) {
+            $data['quantity'] = $request->quantity;
+            $data['track_stock'] = true;
+        }
+        if ($request->has('min_quantity')) $data['min_quantity'] = $request->min_quantity;
 
         if ($request->hasFile('image')) {
             if ($product->image) Storage::disk('public')->delete($product->image);
@@ -140,6 +152,75 @@ class ProductController extends Controller
         }
 
         $product->update($data);
+
+        // Mise à jour des modificateurs
+        // On vérifie si la clé est présente dans la requête (même si vide)
+        // if ($request->has('modifier_groups') || $request->input('clear_modifiers')) {
+        //     // Supprimer proprement les groupes et leurs modificateurs associés
+        //     $product->modifierGroups->each(function($group) {
+        //         $group->modifiers()->delete();
+        //         $group->delete();
+        //     });
+
+        //     $groups = $request->input('modifier_groups', []);
+        //     if (is_array($groups)) {
+        //         foreach ($groups as $i => $groupData) {
+        //             $group = $product->modifierGroups()->create([
+        //                 'name'     => $groupData['name'],
+        //                 'required' => filter_var($groupData['required'] ?? false, FILTER_VALIDATE_BOOLEAN),
+        //                 'multiple' => filter_var($groupData['multiple'] ?? false, FILTER_VALIDATE_BOOLEAN),
+        //                 'order'    => $i,
+        //             ]);
+
+        //             if (isset($groupData['modifiers']) && is_array($groupData['modifiers'])) {
+        //                 foreach ($groupData['modifiers'] as $j => $modData) {
+        //                     $group->modifiers()->create([
+        //                         'name'        => $modData['name'],
+        //                         'extra_price' => $modData['extra_price'] ?? 0,
+        //                         'order'       => $j,
+        //                     ]);
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+        // Mise à jour des modificateurs
+        if ($request->has('modifier_groups') || $request->input('clear_modifiers')) {
+            // Supprimer proprement les groupes et leurs modificateurs associés
+            $product->modifierGroups->each(function($group) {
+                // 1. Supprimer les order_item_modifiers liés (contrainte FK)
+                $modifierIds = $group->modifiers()->pluck('id');
+                \App\Models\OrderItemModifier::whereIn('modifier_id', $modifierIds)->delete();
+
+                // 2. Supprimer les modifiers
+                $group->modifiers()->delete();
+
+                // 3. Supprimer le groupe
+                $group->delete();
+            });
+
+            $groups = $request->input('modifier_groups', []);
+            if (is_array($groups)) {
+                foreach ($groups as $i => $groupData) {
+                    $group = $product->modifierGroups()->create([
+                        'name'     => $groupData['name'],
+                        'required' => filter_var($groupData['required'] ?? false, FILTER_VALIDATE_BOOLEAN),
+                        'multiple' => filter_var($groupData['multiple'] ?? false, FILTER_VALIDATE_BOOLEAN),
+                        'order'    => $i,
+                    ]);
+
+                    if (isset($groupData['modifiers']) && is_array($groupData['modifiers'])) {
+                        foreach ($groupData['modifiers'] as $j => $modData) {
+                            $group->modifiers()->create([
+                                'name'        => $modData['name'],
+                                'extra_price' => $modData['extra_price'] ?? 0,
+                                'order'       => $j,
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
 
         return response()->json($product->load('category', 'modifierGroups.modifiers'));
     }

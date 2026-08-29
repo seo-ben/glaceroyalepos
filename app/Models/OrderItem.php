@@ -12,14 +12,25 @@ class OrderItem extends Model
     protected $fillable = [
         'order_id', 'product_id', 'combo_menu_id', 'quantity',
         'unit_price', 'subtotal', 'status', 'notes', 'course',
-        'sent_at', 'prepared_at', 'served_at'
+        'sent_at', 'prepared_at', 'served_at', 'is_takeaway'
     ];
 
     protected $casts = [
         'sent_at'     => 'datetime',
         'prepared_at' => 'datetime',
         'served_at'   => 'datetime',
+        'is_takeaway' => 'boolean',
     ];
+
+    protected function serializeDate(\DateTimeInterface $date): string
+    {
+        return $date->format('Y-m-d H:i:s');
+    }
+
+    public function getCreatedAtAttribute($value)
+    {
+        return $value;
+    }
 
     public function order()     { return $this->belongsTo(Order::class); }
     public function product()   { return $this->belongsTo(Product::class); }

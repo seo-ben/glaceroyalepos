@@ -9,12 +9,19 @@ use App\Http\Controllers\Api;
 
 // Fallback media route to bypass strict Nginx /storage/ directives on Laravel Cloud
 Route::get('media/{path}', function ($path) {
+    if (str_contains($path, '..') || str_contains($path, '\\') || str_contains($path, '//')) {
+        abort(403, 'Accès non autorisé.');
+    }
     if (!\Illuminate\Support\Facades\Storage::disk('public')->exists($path)) {
         abort(404);
     }
     return response()->file(\Illuminate\Support\Facades\Storage::disk('public')->path($path));
 })->where('path', '.*');
 
+// ATTENTION: Faille de sécurité critique désactivée.
+// Cette route GET publique causait l'effacement complet des données
+// à cause des robots ou des appels automatiques.
+/*
 Route::get('setup-db', function() {
     try {
         // Run migrations
@@ -34,27 +41,8 @@ Route::get('setup-db', function() {
         ], 500);
     }
 });
+*/
 
-Route::get('test-email', function (\Illuminate\Http\Request $request) {
-    $to = $request->query('email', 'sewodakomla@gmail.com');
-    try {
-        \Illuminate\Support\Facades\Mail::raw("Ceci est un test de configuration SMTP pour Smartflow POS. Si vous recevez cet e-mail, la configuration Brevo est fonctionnelle.", function ($message) use ($to) {
-            $message->to($to)
-                ->subject("🧪 TEST SMTP Smartflow POS")
-                ->from(config('mail.from.address'), config('mail.from.name'));
-        });
-        return response()->json([
-            'message' => "E-mail de test envoyé à $to",
-            'from' => config('mail.from.address'),
-            'status' => 'success'
-        ]);
-    } catch (\Exception $e) {
-        return response()->json([
-            'message' => "Erreur d'envoi : " . $e->getMessage(),
-            'status' => 'error'
-        ], 500);
-    }
-});
 
 
 Route::prefix('auth')->group(function () {
@@ -76,24 +64,54 @@ Route::get('orders/{orderId}/ticket', [Api\ReceiptController::class, 'ticket']);
 Route::get('customer-tabs/{tab}/invoice', [Api\CustomerTabController::class, 'invoice']);
 Route::get('receipts/{orderId}/kitchen-ticket', [Api\ReceiptController::class, 'kitchenTicket']);
 Route::get('expenses/{expense}/receipt',        [Api\ExpenseController::class, 'receipt']);
-Route::get('cash-sessions/{session}/report-preview',   [Api\CashSessionController::class, 'reportPreview']);
+Route::get('cash-sessions/{session}/report', [Api\CashSessionController::class, 'reportPreview']);
+Route::get('cash-sessions/{session}/report-html', [Api\CashSessionController::class, 'reportHtml']);
+Route::get('qz/certificate', [Api\QzController::class, 'getCertificate']);
+Route::post('qz/sign',        [Api\QzController::class, 'sign']);
 
 // =============================================
 // ROUTES PROTÉGÉES
 // =============================================
 Route::middleware('auth:sanctum')->group(function () {
 
+    Route::get('test-email', function (\Illuminate\Http\Request $request) {
+        $to = $request->query('email', 'sewodakomla@gmail.com');
+        try {
+            \Illuminate\Support\Facades\Mail::raw("Ceci est un test de configuration SMTP pour Smartflow POS. Si vous recevez cet e-mail, la configuration Brevo est fonctionnelle.", function ($message) use ($to) {
+                $message->to($to)
+                    ->subject("🧪 TEST SMTP Smartflow POS")
+                    ->from(config('mail.from.address'), config('mail.from.name'));
+            });
+            return response()->json([
+                'message' => "E-mail de test envoyé à $to",
+                'from' => config('mail.from.address'),
+                'status' => 'success'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => "Erreur d'envoi : " . $e->getMessage(),
+                'status' => 'error'
+            ], 500);
+        }
+    });
+
     // Auth
     Route::prefix('auth')->group(function () {
         Route::post('logout',         [Api\Auth\AuthController::class, 'logout']);
         Route::get('me',              [Api\Auth\AuthController::class, 'me']);
         Route::put('change-password', [Api\Auth\AuthController::class, 'changePassword']);
+        Route::post('validate-admin-pin', [Api\Auth\AuthController::class, 'validateAdminPin']);
     });
 
     // Utilisateurs & Rôles
     Route::apiResource('users', Api\UserController::class);
     Route::patch('users/{user}/toggle-active', [Api\UserController::class, 'toggleActive']);
     Route::get('roles', [Api\RoleController::class, 'index']);
+
+    // IPs Bloquées
+    Route::get('blocked-ips', [Api\BlockedIpController::class, 'index']);
+    Route::post('blocked-ips', [Api\BlockedIpController::class, 'store']);
+    Route::delete('blocked-ips/{id}', [Api\BlockedIpController::class, 'destroy']);
 
     // Salles
     Route::apiResource('floors', Api\FloorController::class);
@@ -102,7 +120,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('floors/{floor}/tables/{table}', [Api\FloorController::class, 'removeTable']);
 
     // Tables
-    Route::get('tables',                   [Api\TableController::class, 'allTables']);
+    Route::get('tables',          [Api\TableController::class, 'allTables']);
+    Route::get('tables/all',      [Api\TableController::class, 'allTables']);
+    Route::get('tables/occupied', [Api\TableController::class, 'occupiedTables']);
     Route::put('tables/{table}/status',    [Api\TableController::class, 'updateStatus']);
     Route::put('tables/{table}/layout',    [Api\TableController::class, 'updateLayout']);
     Route::put('tables/{table}/assign',    [Api\TableController::class, 'assign']);
@@ -111,12 +131,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('tables/merge',            [Api\TableController::class, 'merge']);
 
     // Commandes
-    Route::apiResource('orders', Api\OrderController::class)->except(['destroy']);
+    Route::get('orders/active-counts',                [Api\OrderController::class, 'activeCounts']);
+    Route::get('orders/active-pending',               [Api\OrderController::class, 'activePending']);
     Route::get('orders/table/{tableId}/current',      [Api\OrderController::class, 'currentByTable']);
+    Route::apiResource('orders', Api\OrderController::class)->except(['destroy']);
     Route::put('orders/{order}/items',                [Api\OrderController::class, 'updateItems']);
     Route::post('orders/{order}/add-items',           [Api\OrderController::class, 'addItems']);
     Route::post('orders/{order}/send-to-kitchen',     [Api\OrderController::class, 'sendToKitchen']);
     Route::put('orders/{order}/discount',             [Api\OrderController::class, 'applyDiscount']);
+    Route::post('orders/{order}/reopen',              [Api\OrderController::class, 'reopen']);
 
     // Paiements
     Route::post('payments',       [Api\PaymentController::class, 'store']);
@@ -134,6 +157,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Dépenses de caisse
     Route::get('expenses',              [Api\ExpenseController::class, 'index']);
     Route::post('expenses',             [Api\ExpenseController::class, 'store']);
+    Route::put('expenses/{expense}',    [Api\ExpenseController::class, 'update']);
     Route::delete('expenses/{expense}', [Api\ExpenseController::class, 'destroy']);
     Route::get('expenses/summary',      [Api\ExpenseController::class, 'summary']);
 
@@ -156,7 +180,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/',                           [Api\CustomerTabController::class, 'index']);
         Route::post('/',                          [Api\CustomerTabController::class, 'store']);
         Route::get('/{tab}',                      [Api\CustomerTabController::class, 'show']);
+        Route::put('/{tab}',                      [Api\CustomerTabController::class, 'update']);
         Route::post('/{tab}/attach',              [Api\CustomerTabController::class, 'attachOrder']);
+        Route::post('/{tab}/detach',              [Api\CustomerTabController::class, 'detachOrder']);
         Route::post('/{tab}/pay',                 [Api\CustomerTabController::class, 'pay']);
         Route::post('/{tab}/cancel',              [Api\CustomerTabController::class, 'cancel']);
         Route::post('/{tab}/print-network',       [Api\CustomerTabController::class, 'printNetwork']);

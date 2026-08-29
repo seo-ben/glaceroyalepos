@@ -71,6 +71,48 @@ class CustomerTabController extends Controller
         return response()->json($tab, 201);
     }
 
+    /** Modifier les informations d'une ardoise */
+    public function update(Request $request, CustomerTab $tab)
+    {
+        abort_if($tab->restaurant_id !== $request->user()->restaurant_id, 403);
+        abort_unless($request->user()->isManager(), 403, 'Seul un administrateur peut modifier les clients.');
+
+        $request->validate([
+            'last_name'  => 'required|string|max:100',
+            'first_name' => 'required|string|max:100',
+            'phone'      => 'required|string|max:20',
+            'notes'      => 'nullable|string',
+        ]);
+
+        // Vérifier si une autre ardoise ouverte existe déjà pour ce téléphone
+        if ($request->phone !== $tab->phone) {
+            $existing = CustomerTab::where('restaurant_id', $request->user()->restaurant_id)
+                ->where('phone', $request->phone)
+                ->where('status', 'open')
+                ->where('id', '!=', $tab->id)
+                ->first();
+
+            if ($existing) {
+                return response()->json([
+                    'message' => 'Une ardoise ouverte existe déjà pour ce numéro.',
+                    'tab'     => $existing,
+                ], 422);
+            }
+        }
+
+        $tab->update([
+            'last_name'  => $request->last_name,
+            'first_name' => $request->first_name,
+            'phone'      => $request->phone,
+            'notes'      => $request->notes,
+        ]);
+
+        $tab->logActivity('tab_updated', "Ardoise mise à jour pour {$tab->full_name} ({$tab->phone})");
+
+        return response()->json($tab);
+    }
+
+
     /** Détail d'une ardoise avec ses commandes */
     public function show(Request $request, CustomerTab $tab)
     {
@@ -140,6 +182,83 @@ class CustomerTabController extends Controller
             'tab'     => $tab->fresh(['orders']),
         ]);
     }
+
+    /** Détacher une commande d'une ardoise */
+    public function detachOrder(Request $request, CustomerTab $tab)
+    {
+        abort_if($tab->restaurant_id !== $request->user()->restaurant_id, 403);
+        abort_unless($request->user()->isManager(), 403, 'Manager requis.');
+        abort_if(in_array($tab->status, ['paid', 'cancelled']), 422, 'Ardoise déjà payée ou annulée.');
+
+        $request->validate(['order_id' => 'required|exists:orders,id']);
+
+        $order = Order::findOrFail($request->order_id);
+        abort_if($order->restaurant_id !== $request->user()->restaurant_id, 403);
+
+        // Vérifier que la commande est bien rattachée à cette ardoise
+        $attached = $tab->orders()->where('orders.id', $order->id)->exists();
+        if (!$attached) {
+            return response()->json(['message' => 'Cette commande n\'est pas rattachée à cette ardoise.'], 422);
+        }
+
+        // Vérifier la session de caisse pour les paiements de la commande
+        $payments = $order->payments()->get();
+        foreach ($payments as $p) {
+            if ($p->cash_session_id) {
+                $session = \App\Models\CashSession::find($p->cash_session_id);
+                if ($session && $session->closed_at) {
+                    abort(422, "Impossible de détacher cette commande car elle a des paiements associés à une session de caisse déjà clôturée (#{$session->id}).");
+                }
+            }
+        }
+
+        DB::transaction(function () use ($tab, $order, $payments, $request) {
+            $totalPaidOnOrder = $payments->sum('amount');
+
+            // 1. Supprimer les paiements de cette commande
+            $order->payments()->delete();
+
+            // 2. Détacher de l'ardoise
+            $tab->orders()->detach($order->id);
+
+            // 3. Décrémenter le montant payé de l'ardoise
+            if ($totalPaidOnOrder > 0) {
+                $tab->decrement('paid_amount', $totalPaidOnOrder);
+            }
+
+            // 4. Recalculer le total de l'ardoise
+            $tab->recalculate();
+
+            // 5. Repasser la commande au statut 'open'
+            $order->update([
+                'status' => 'open',
+                'paid_at' => null,
+                'cashier_id' => null,
+            ]);
+
+            // 6. Sécurité de la Table : ré-occuper la table si elle est libre
+            if ($order->table_id) {
+                $table = $order->table;
+                if ($table && in_array(strtolower($table->status), ['available', 'free'])) {
+                    $table->update([
+                        'status'           => 'occupied',
+                        'occupied_since'   => now(),
+                        'assigned_user_id' => $request->user()->id,
+                    ]);
+                }
+            }
+
+            // 7. Enregistrer l'activité
+            $tab->logActivity('order_detached', "Commande #{$order->order_number} détachée de l'ardoise. Paiements annulés: {$totalPaidOnOrder} FCFA");
+            $order->logActivity('order_detached_from_tab', "Commande détachée de l'ardoise de {$tab->full_name} par {$request->user()->full_name}");
+        });
+
+        return response()->json([
+            'message' => 'Commande retirée de l\'ardoise avec succès.',
+            'tab'     => $tab->fresh(['orders']),
+        ]);
+    }
+
 
     /** Paiement d'une ardoise (total ou partiel) */
     public function pay(Request $request, CustomerTab $tab)

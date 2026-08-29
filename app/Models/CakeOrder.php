@@ -31,6 +31,16 @@ class CakeOrder extends Model
         'paid_at'         => 'datetime',
     ];
 
+    protected function serializeDate(\DateTimeInterface $date): string
+    {
+        return $date->format('Y-m-d H:i:s');
+    }
+
+    public function getCreatedAtAttribute($value)
+    {
+        return $value;
+    }
+
     public function restaurant() { return $this->belongsTo(Restaurant::class); }
     public function cashier()    { return $this->belongsTo(User::class, 'user_id'); }
 
@@ -38,7 +48,9 @@ class CakeOrder extends Model
     public static function generateNumber(int $restaurantId): string
     {
         $today = now()->format('Ymd');
-        $count = static::where('restaurant_id', $restaurantId)
+        // $count = static::where('restaurant_id', $restaurantId)
+        $count = static::withTrashed()
+            ->where('restaurant_id', $restaurantId)
             ->whereDate('created_at', today())
             ->count() + 1;
         return "CAKE-{$today}-" . str_pad($count, 4, '0', STR_PAD_LEFT);

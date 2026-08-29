@@ -24,16 +24,35 @@ class ProcessStockDeduction implements ShouldQueue
         DB::transaction(function () {
             $items = $this->order->items()
                 ->whereNotIn('status', ['cancelled'])
-                ->with('product.recipes.ingredient')
+                ->with(['product.recipes.ingredient'])
                 ->get();
 
             foreach ($items as $item) {
-                $recipes = $item->product->recipes ?? [];
+                $product = $item->product;
+                if (!$product) continue;
+
+                // 1. Déduction directe de la quantité en stock du produit (si suivi de stock activé)
+                if ($product->track_stock) {
+                    $beforeQty = (float) $product->quantity;
+                    $neededQty = (float) $item->quantity;
+                    $afterQty  = max(0, $beforeQty - $neededQty);
+
+                    $product->update(['quantity' => $afterQty]);
+
+                    if ($afterQty <= $product->min_quantity) {
+                        Log::warning("Stock faible produit : {$product->name} = {$afterQty}");
+                    }
+                }
+
+                // 2. Déduction des ingrédients associés via la fiche technique / recette
+                $recipes = $product->recipes ?? [];
 
                 foreach ($recipes as $recipe) {
-                    $quantityNeeded = $recipe->quantity * $item->quantity;
                     $ingredient = $recipe->ingredient;
-                    $before = $ingredient->quantity;
+                    if (!$ingredient) continue;
+
+                    $quantityNeeded = (float) $recipe->quantity * (float) $item->quantity;
+                    $before = (float) $ingredient->quantity;
                     $after  = max(0, $before - $quantityNeeded);
 
                     StockMovement::create([
@@ -50,7 +69,7 @@ class ProcessStockDeduction implements ShouldQueue
                     $ingredient->update(['quantity' => $after]);
 
                     if ($after <= $ingredient->min_quantity) {
-                        Log::warning("Stock faible: {$ingredient->name} = {$after} {$ingredient->unit}");
+                        Log::warning("Stock faible ingrédient : {$ingredient->name} = {$after} {$ingredient->unit}");
                     }
                 }
             }

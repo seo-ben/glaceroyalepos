@@ -28,16 +28,21 @@ class CashSessionController extends Controller
         $totals = $this->computeTotals($session);
         $expensesTotal = Expense::where('cash_session_id', $session->id)->sum('amount');
 
-        // On injecte les valeurs dynamiques dont le frontend a besoin
-        $session->total_sales = $totals['grand_total'];
-        $session->expected_amount = (float)$session->opening_amount + (float)$totals['cash'] - (float)$expensesTotal;
+        // Ventes Vécues = Somme de TOUT (Physique + Gozem)
+        $session->total_sales = (float)$totals['grand_total'] + (float)$totals['gozem_orders_total'];
+        
+        // Total Attendu = Opening + Uniquement le Physique (grand_total) - Dépenses
+        $session->expected_amount = (float)$session->opening_amount + (float)$totals['grand_total'] - (float)$expensesTotal;
+        
         $session->total_expenses = (float)$expensesTotal;
 
         return response()->json([
             'session'            => $session,
             'payments_by_method' => $totals,
             'totals'             => $totals,
-            'orders_count'       => Payment::where('cash_session_id', $session->id)->distinct('order_id')->count(),
+            'gozem_orders_total' => $totals['gozem_orders_total'] ?? 0,
+            'cake_orders_total'  => $totals['cake_orders_total'] ?? 0,
+            'orders_count'       => Payment::where('cash_session_id', $session->id)->distinct('order_id')->count() + Payment::where('cash_session_id', $session->id)->distinct('cake_order_id')->count(),
             'expenses_total'     => $expensesTotal,
         ]);
     }
@@ -79,12 +84,11 @@ class CashSessionController extends Controller
 
         $closingAmount = (float)$request->amount_to_bank + (float)$request->remaining_amount;
 
-        // Calcul des totaux par méthode de paiement
         $totals   = $this->computeTotals($session);
-        $cashIn   = $totals['cash'] ?? 0;
-        $expected = $session->opening_amount + $cashIn;
-        $diff     = $closingAmount - $expected;
+        $cashIn   = $totals['grand_total'] ?? 0;
         $expenses = Expense::where('cash_session_id', $session->id)->sum('amount');
+        $expected = $session->opening_amount + $cashIn - $expenses;
+        $diff     = $closingAmount - $expected;
 
         DB::transaction(function () use ($session, $request, $totals, $expected, $diff, $expenses, $closingAmount) {
             $session->update([
@@ -101,11 +105,14 @@ class CashSessionController extends Controller
                 'orange_money_total'  => $totals['orange_money'] ?? 0,
                 'momo_total'          => $totals['momo'] ?? 0,
                 'other_total'         => $totals['other'] ?? 0,
+                'gozem_orders_total'  => $totals['gozem_orders_total'] ?? 0,
+                'cake_orders_total'   => $totals['cake_orders_total'] ?? 0,
                 'total_expenses'      => $expenses,
             ]);
         });
 
-        $session->logActivity('cash_session_closed',
+        $session->logActivity(
+            'cash_session_closed',
             "Session fermée. Attendu: {$expected} | Compté: {$request->closing_amount} | Écart: {$diff}"
         );
 
@@ -142,7 +149,7 @@ class CashSessionController extends Controller
                 'amount_to_bank' => $request->amount_to_bank ?? $session->amount_to_bank,
                 'remaining_amount' => $request->remaining_amount ?? $session->remaining_amount,
             ]);
-            
+
             // Recalculer la différence (écart) s'il y a lieu
             if ($session->expected_amount > 0) {
                 $totalCounted = (float)$session->amount_to_bank + (float)$session->remaining_amount;
@@ -162,40 +169,78 @@ class CashSessionController extends Controller
     public function reportPreview(Request $request, CashSession $session)
     {
         $pdfContent = $this->reportService->generateSessionPdf($session);
-        
+
         return response($pdfContent)
             ->header('Content-Type', 'application/pdf')
             ->header('Content-Disposition', 'attachment; filename="Rapport-Session-' . $session->id . '.pdf"');
+    }
+
+    public function reportHtml(Request $request, CashSession $session)
+    {
+        $session->load(['user', 'restaurant']);
+        $html = app(\App\Services\TicketPrintService::class)->sessionReportHtml($session);
+        return response()->json(['html' => $html]);
     }
 
     /** Historique des sessions */
     public function index(Request $request)
     {
         $sessions = CashSession::with('user:id,first_name,last_name')
+            ->withSum('payments', 'amount')
             ->where('restaurant_id', $request->user()->restaurant_id)
             ->when($request->date, fn($q) => $q->whereDate('opened_at', $request->date))
             ->latest('opened_at')
             ->paginate(20);
 
+        // Pour les sessions encore ouvertes, calculer dynamiquement, et pour l'historique utiliser le sum des paiements
+        $sessions->getCollection()->transform(function ($session) {
+            // Toujours utiliser la vraie somme des paiements pour les Ventes Net (correspond au Dashboard)
+            $session->total_sales = (float)($session->payments_sum_amount ?? 0);
+            
+            if (!$session->closed_at) {
+                $totals = $this->computeTotals($session);
+                $expensesTotal = Expense::where('cash_session_id', $session->id)->sum('amount');
+                $session->total_expenses = (float)$expensesTotal;
+                $session->expected_amount = (float)$session->opening_amount + (float)$totals['grand_total'] - (float)$expensesTotal;
+            }
+            return $session;
+        });
+
         return response()->json($sessions);
     }
 
-    /** Calculer les totaux par méthode pour une session */
     private function computeTotals(CashSession $session): array
     {
-        $rows = Payment::where('cash_session_id', $session->id)
-            ->selectRaw('method, SUM(amount) as total')
-            ->groupBy('method')
-            ->pluck('total', 'method')
+        // 1. Récupérer tous les paiements de la session
+        $allPayments = Payment::where('cash_session_id', $session->id)->get();
+
+        // 2. Identifier les commandes Gozem pour les exclure du "physique" (argent non présent en caisse)
+        $gozemOrderIds = \App\Models\Order::where('restaurant_id', $session->restaurant_id)
+            ->where('type', 'gozem')
+            ->pluck('id')
             ->toArray();
 
-        // Normaliser toutes les méthodes
-        $methods = ['cash', 'card', 'wave', 'orange_money', 'momo', 'other'];
-        $totals  = [];
-        foreach ($methods as $m) {
-            $totals[$m] = round($rows[$m] ?? 0, 2);
+        // Séparation des paiements
+        $gozemPayments = $allPayments->filter(fn($p) => in_array($p->order_id, $gozemOrderIds));
+        $physicalPayments = $allPayments->filter(fn($p) => !in_array($p->order_id, $gozemOrderIds));
+
+        // 3. Totaux par méthode pour le physique (ce qui est réellement en caisse)
+        $totals = [];
+        foreach ($physicalPayments->groupBy('method') as $method => $group) {
+            $totals[$method] = round($group->sum('amount'), 2);
         }
+
+        if (!isset($totals['cash'])) {
+            $totals['cash'] = 0;
+        }
+
+        // Le grand_total représente ce qui doit être physiquement en caisse (incluant CB/Mobile Money encaissés par le resto)
         $totals['grand_total'] = array_sum($totals);
+
+        // 4. Totaux informatifs pour le frontend
+        $totals['gozem_orders_total'] = (float)round($gozemPayments->sum('amount'), 2);
+        $totals['cake_orders_total'] = (float)round($allPayments->whereNotNull('cake_order_id')->sum('amount'), 2);
+
         return $totals;
     }
 }

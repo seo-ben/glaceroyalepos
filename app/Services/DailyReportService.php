@@ -30,12 +30,12 @@ class DailyReportService
         
         // 1. En-tête
         $pdf->SetFont('Helvetica', 'B', 18);
-        $pdf->SetTextColor(249, 115, 22); // Orange
+        $pdf->SetTextColor(0, 0, 0); // Noir
         $restaurantName = $data['restaurant'] ? $data['restaurant']->name : 'RESTAURANT';
         $pdf->Cell(0, 8, utf8_decode(strtoupper($restaurantName)), 0, 1, 'C');
         
         $pdf->SetFont('Helvetica', '', 11);
-        $pdf->SetTextColor(100, 100, 100);
+        $pdf->SetTextColor(0, 0, 0);
         $pdf->Cell(0, 6, "RAPPORT FINANCIER DE CAISSE", 0, 1, 'C');
         $pdf->Ln(4);
         
@@ -56,9 +56,9 @@ class DailyReportService
         $currentY = $pdf->GetY();
         
         // Rectangles de fond pour Recette, Dépenses
-        $pdf->SetFillColor(30, 41, 59); // Bleu foncé
+        $pdf->SetFillColor(0, 0, 0); // Noir
         $pdf->Rect(10, $currentY, 90, 20, 'F');
-        $pdf->SetFillColor(241, 245, 249); // Gris clair
+        $pdf->SetFillColor(240, 240, 240); // Gris très clair
         $pdf->Rect(105, $currentY, 95, 20, 'F');
         
         // Textes
@@ -76,11 +76,11 @@ class DailyReportService
             $pdf->Cell(90, 5, utf8_decode("(Dont TVA : " . number_format((float)$data['totalVat'], 0, ',', ' ') . " F)"), 0, 1, 'C');
         }
 
-        $pdf->SetTextColor(71, 85, 105);
+        $pdf->SetTextColor(0, 0, 0);
         $pdf->SetXY(105, $currentY + 3);
         $pdf->SetFont('Helvetica', '', 8);
         $pdf->Cell(95, 5, utf8_decode("DÉPENSES"), 0, 1, 'C');
-        $pdf->SetTextColor(239, 68, 68); // Rouge
+        $pdf->SetTextColor(0, 0, 0); 
         $pdf->SetXY(105, $currentY + 8);
         $pdf->SetFont('Helvetica', 'B', 14);
         $pdf->Cell(95, 8, "- " . number_format((float)$data['totalExpenses'], 0, ',', ' ') . " FCFA", 0, 1, 'C');
@@ -90,7 +90,7 @@ class DailyReportService
 
         // 4. Synthèse Trésorerie
         $pdf->SetFont('Helvetica', 'B', 11);
-        $pdf->SetFillColor(26, 26, 46);
+        $pdf->SetFillColor(0, 0, 0);
         $pdf->SetTextColor(255, 255, 255);
         $pdf->Cell(0, 8, utf8_decode(" SYNTHESE DES FLUX"), 0, 1, 'L', true);
         
@@ -99,17 +99,20 @@ class DailyReportService
         $pdf->Cell(90, 6, "Ouverture de caisse", 'B', 0, 'L');
         $pdf->Cell(90, 6, number_format((float)$session->opening_amount, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
         
+        // Calcul dynamique si la session n'est pas encore clôturée
+        $cashSales = (float)($session->cash_total > 0 ? $session->cash_total : ($data['payments']->filter(fn($p) => strtolower($p->method) === 'cash')->sum('total') ?? 0));
         $pdf->Cell(90, 6, "Ventes en especes", 'B', 0, 'L');
-        $pdf->Cell(90, 6, "+" . number_format((float)($session->expected_amount - $session->opening_amount + $data['totalExpenses']), 0, ',', ' ') . " FCFA", 'B', 1, 'R');
+        $pdf->Cell(90, 6, "+" . number_format($cashSales, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
         
-        $pdf->SetTextColor(220, 38, 38);
+        $pdf->SetTextColor(0, 0, 0);
         $pdf->Cell(90, 6, utf8_decode("Depenses deduites"), 'B', 0, 'L');
         $pdf->Cell(90, 6, "-" . number_format((float)$data['totalExpenses'], 0, ',', ' ') . " FCFA", 'B', 1, 'R');
         
+        $expectedAmount = (float)($session->expected_amount > 0 ? $session->expected_amount : ($session->opening_amount + $cashSales - $data['totalExpenses']));
         $pdf->SetTextColor(0, 0, 0);
         $pdf->SetFont('Helvetica', 'B', 11);
         $pdf->Cell(90, 8, "MONTANT TOTAL ATTENDU", 'B', 0, 'L');
-        $pdf->Cell(90, 8, number_format((float)$session->expected_amount, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
+        $pdf->Cell(90, 8, number_format($expectedAmount, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
         
         $pdf->SetFont('Helvetica', '', 10);
         $pdf->Cell(90, 6, "Verse a la Banque", 'B', 0, 'L');
@@ -118,7 +121,7 @@ class DailyReportService
         $pdf->Cell(90, 6, "Fond de roulement restant", 'B', 0, 'L');
         $pdf->Cell(90, 6, ($session->remaining_amount ? number_format((float)$session->remaining_amount, 0, ',', ' ') : '0') . " FCFA", 'B', 1, 'R');
         
-        $diffColor = ($session->difference ?? 0) >= 0 ? [22, 163, 74] : [220, 38, 38];
+        $diffColor = [0, 0, 0];
         $pdf->SetFont('Helvetica', 'B', 13);
         $pdf->Cell(90, 10, utf8_decode("ECART FINAL"), 'B', 0, 'L');
         $pdf->SetTextColor($diffColor[0], $diffColor[1], $diffColor[2]);
@@ -129,7 +132,7 @@ class DailyReportService
 
         // 5. Modes de Paiements
         $pdf->SetFont('Helvetica', 'B', 11);
-        $pdf->SetFillColor(26, 26, 46);
+        $pdf->SetFillColor(0, 0, 0);
         $pdf->SetTextColor(255, 255, 255);
         $pdf->Cell(0, 8, utf8_decode(" DETAILS DES ENCAISSEMENTS"), 0, 1, 'L', true);
         
@@ -146,11 +149,31 @@ class DailyReportService
             $pdf->Cell(70, 6, number_format((float)$p->total, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
         }
 
+        $gozemTotal = (float)($session->gozem_orders_total > 0 ? $session->gozem_orders_total : $data['gozem_orders_total']);
+        if ($gozemTotal > 0) {
+            $pdf->Ln(2);
+            $pdf->SetFont('Helvetica', 'B', 10);
+            $pdf->SetTextColor(255, 140, 0); // Orange
+            $pdf->Cell(110, 6, "DONT COMMANDES GOZEM (Total)", 'B', 0, 'L');
+            $pdf->Cell(70, 6, number_format($gozemTotal, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
+            $pdf->SetTextColor(0, 0, 0);
+        }
+
+        $cakeTotal = (float)($session->cake_orders_total > 0 ? $session->cake_orders_total : ($data['cake_orders_total'] ?? 0));
+        if ($cakeTotal > 0) {
+            $pdf->Ln(2);
+            $pdf->SetFont('Helvetica', 'B', 10);
+            $pdf->SetTextColor(0, 128, 0); // Vert
+            $pdf->Cell(110, 6, utf8_decode("DONT COMMANDES GÂTEAUX (Total)"), 'B', 0, 'L');
+            $pdf->Cell(70, 6, number_format($cakeTotal, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
+            $pdf->SetTextColor(0, 0, 0);
+        }
+
         $pdf->Ln(8);
 
         // 5.5 Performances des secteurs (Catégories) et Crédits
         $pdf->SetFont('Helvetica', 'B', 11);
-        $pdf->SetFillColor(26, 26, 46);
+        $pdf->SetFillColor(0, 0, 0);
         $pdf->SetTextColor(255, 255, 255);
         $pdf->Cell(0, 8, utf8_decode(" PERFORMANCES DES SECTEURS ET CRÉDITS"), 0, 1, 'L', true);
         
@@ -163,19 +186,30 @@ class DailyReportService
         foreach ($data['categoryStats'] as $catStat) {
             if ($pdf->GetY() > 270) $pdf->AddPage();
             $pdf->Cell(130, 6, utf8_decode("VENTES - " . strtoupper($catStat->category_name)), 'B', 0, 'L');
-            $pdf->SetTextColor(16, 185, 129); // Green text
+            $pdf->SetTextColor(0, 0, 0); 
             $pdf->Cell(50, 6, number_format((float)$catStat->total_amount, 0, ',', ' ') . " FCFA", 'B', 1, 'R');
             $pdf->SetTextColor(0, 0, 0); // Reset
         }
         
         if ($pdf->GetY() > 270) $pdf->AddPage();
-        $pdf->SetTextColor(234, 88, 12); // Orange text
+        $pdf->SetTextColor(0, 0, 0);
         $pdf->SetFont('Helvetica', 'B', 10);
         $pdf->Cell(130, 6, utf8_decode("TOTAL DES ARDOISES (CRÉDITS)"), 'B', 0, 'L');
         $pdf->Cell(50, 6, number_format((float)$data['totalCredits'], 0, ',', ' ') . " FCFA", 'B', 1, 'R');
         $pdf->SetTextColor(0, 0, 0); // Reset
         
-        $pdf->Ln(8);
+        $pdf->Ln(5);
+        
+        // 6. QR Code
+        $qrPath = public_path('img/website_qr.png');
+        if (file_exists($qrPath)) {
+            $pdf->Image($qrPath, 90, $pdf->GetY(), 30, 30);
+            $pdf->Ln(32);
+        }
+
+        $pdf->SetFont('Helvetica', 'I', 8);
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->Cell(0, 6, utf8_decode("Document généré le " . date('d/m/Y à H:i') . " par Omega POS"), 0, 1, 'C');
 
         return $pdf->Output('S');
     }
@@ -185,49 +219,86 @@ class DailyReportService
      */
     public function getReportData(CashSession $session): array
     {
-        $revenueData = \App\Models\Order::whereHas('payments', fn($q) => $q->where('cash_session_id', $session->id))
-            ->selectRaw('SUM(total) as revenue, SUM(vat_amount) as vat')
-            ->first();
-            
-        $totalRevenue = (float)($revenueData->revenue ?? 0);
-        $totalVat = (float)($revenueData->vat ?? 0);
-        $totalExpenses = Expense::where('cash_session_id', $session->id)->sum('amount');
-        $restaurant = $session->restaurant;
+        // 1. Chiffre d'affaires basé sur les PAIEMENTS de cette session (C'est le plus juste)
+        $paymentsQuery = \App\Models\Payment::where('cash_session_id', $session->id);
         
-        $newCredits = \App\Models\Order::whereHas('customerTabs')
-            ->whereBetween('paid_at', [$session->opened_at, $session->closed_at ?? now()])
-            ->sum('total');
-
-        $tabDetails = \App\Models\Order::whereHas('customerTabs')
-            ->with(['customerTabs'])
-            ->whereBetween('paid_at', [$session->opened_at, $session->closed_at ?? now()])
-            ->get();
-
-        $payments = \App\Models\Payment::where('cash_session_id', $session->id)
-            ->selectRaw('method, SUM(amount) as total, COUNT(*) as count')
+        $totalRevenue = (float)$paymentsQuery->sum('amount');
+        
+        // Exclure les paiements Gozem du revenu "physique" si nécessaire, mais ici on garde tout pour la synthèse
+        $payments = $paymentsQuery->selectRaw('method, SUM(amount) as total, COUNT(*) as count')
             ->groupBy('method')
             ->get();
 
+        // 2. Dépenses
+        $totalExpenses = Expense::where('cash_session_id', $session->id)->sum('amount');
+        $restaurant = $session->restaurant;
+
+        // 3. Ardoises / Crédits (Commandes liées à un client mais payées en "tab")
+        // On cherche les commandes payées durant cette session via la méthode 'tab'
+        $tabDetails = \App\Models\Order::whereHas('payments', function($q) use ($session) {
+                $q->where('cash_session_id', $session->id)->where('method', 'tab');
+            })
+            ->with(['customerTabs'])
+            ->get();
+        $newCredits = $tabDetails->sum('total');
+
+        // 4. Statistiques produits (incluant les gâteaux)
         $productStats = \Illuminate\Support\Facades\DB::table('order_items')
             ->join('orders', 'order_items.order_id', '=', 'orders.id')
-            ->join('payments', 'payments.order_id', '=', 'orders.id')
             ->join('products', 'order_items.product_id', '=', 'products.id')
-            ->where('payments.cash_session_id', $session->id)
+            ->whereIn('orders.id', function($query) use ($session) {
+                $query->select('order_id')->from('payments')->where('cash_session_id', $session->id)->whereNotNull('order_id');
+            })
+            ->whereNull('order_items.deleted_at')
             ->select('products.name', \Illuminate\Support\Facades\DB::raw('SUM(order_items.quantity) as total_qty'), \Illuminate\Support\Facades\DB::raw('SUM(order_items.subtotal) as total_amount'))
             ->groupBy('products.id', 'products.name')
             ->orderByDesc('total_amount')
             ->get();
 
+        // Ajouter les gâteaux aux stats produits
+        $cakeStats = \App\Models\CakeOrder::where('cash_session_id', $session->id)
+            ->get()
+            ->map(function($cake) {
+                return (object)[
+                    'name' => "GATEAU: " . $cake->customer_name . " (#" . $cake->order_number . ")",
+                    'total_qty' => 1,
+                    'total_amount' => $cake->total
+                ];
+            });
+        
+        $productStats = collect($productStats)->concat($cakeStats)->sortByDesc('total_amount');
+
         $categoryStats = \Illuminate\Support\Facades\DB::table('order_items')
             ->join('orders', 'order_items.order_id', '=', 'orders.id')
-            ->join('payments', 'payments.order_id', '=', 'orders.id')
             ->join('products', 'order_items.product_id', '=', 'products.id')
             ->join('categories', 'products.category_id', '=', 'categories.id')
-            ->where('payments.cash_session_id', $session->id)
+            ->whereIn('orders.id', function($query) use ($session) {
+                $query->select('order_id')->from('payments')->where('cash_session_id', $session->id)->whereNotNull('order_id');
+            })
+            ->whereNull('order_items.deleted_at')
             ->select('categories.name as category_name', \Illuminate\Support\Facades\DB::raw('SUM(order_items.quantity) as total_qty'), \Illuminate\Support\Facades\DB::raw('SUM(order_items.subtotal) as total_amount'))
             ->groupBy('categories.id', 'categories.name')
             ->orderByDesc('total_amount')
             ->get();
+
+        // Ajouter les gâteaux aux stats catégories
+        $cakeCategoryTotal = \App\Models\Payment::where('cash_session_id', $session->id)
+            ->whereNotNull('cake_order_id')
+            ->sum('amount');
+
+        if ($cakeCategoryTotal > 0) {
+            $categoryStats = collect($categoryStats)->concat([
+                (object)[
+                    'category_name' => 'PATISSERIE / GATEAUX',
+                    'total_qty' => \App\Models\Payment::where('cash_session_id', $session->id)->whereNotNull('cake_order_id')->count(),
+                    'total_amount' => $cakeCategoryTotal
+                ]
+            ])->sortByDesc('total_amount');
+        }
+
+        $totalVat = (float)\App\Models\Order::whereIn('id', function($q) use ($session) {
+            $q->select('order_id')->from('payments')->where('cash_session_id', $session->id)->whereNotNull('order_id');
+        })->sum('vat_amount');
 
         $logs = \App\Models\ActivityLog::where('restaurant_id', $session->restaurant_id)
             ->where(function($q) use ($session) {
@@ -240,20 +311,32 @@ class DailyReportService
                 });
             })->with('user')->orderBy('created_at', 'asc')->limit(100)->get();
 
-        $pdfUrl = config('app.url') . "/api/cash-sessions/{$session->id}/report-preview";
+        $pdfUrl = rtrim(config('app.url'), '/') . "/api/cash-sessions/{$session->id}/report";
+
+        $gozemOrdersTotal = (float)\App\Models\Order::where('restaurant_id', $session->restaurant_id)
+            ->where('type', 'gozem')
+            ->whereIn('id', function($q) use ($session) {
+                $q->select('order_id')->from('payments')->where('cash_session_id', $session->id)->whereNotNull('order_id');
+            })
+            ->sum('total');
+
+        $cakeOrdersTotal = (float)\App\Models\Payment::where('cash_session_id', $session->id)
+            ->whereNotNull('cake_order_id')
+            ->sum('amount');
 
         return [
-            'session' => $session,
-            'totalRevenue' => $totalRevenue,
-            'totalVat' => $totalVat,
-            'totalExpenses' => $totalExpenses,
-            'totalCredits' => $newCredits,
-            'tabDetails' => $tabDetails,
-            'payments' => $payments,
-            'productStats' => $productStats,
-            'categoryStats' => $categoryStats, // Ajout
+            'session'            => $session,
+            'restaurant'         => $restaurant,
+            'totalRevenue'       => $totalRevenue,
+            'payments'           => $payments,
+            'totalExpenses'      => $totalExpenses,
+            'totalCredits'       => $newCredits,
+            'productStats'       => $productStats,
+            'categoryStats'      => $categoryStats,
+            'totalVat'           => $totalVat,
+            'gozem_orders_total' => $gozemOrdersTotal,
+            'cake_orders_total'  => $cakeOrdersTotal,
             'logs' => $logs,
-            'restaurant' => $restaurant,
             'pdfUrl' => $pdfUrl,
         ];
     }

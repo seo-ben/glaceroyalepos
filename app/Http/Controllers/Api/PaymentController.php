@@ -18,11 +18,12 @@ class PaymentController extends Controller
         $request->validate([
             'order_id'     => 'required|exists:orders,id',
             'amount'       => 'required|numeric|min:0.01',
-            'method'       => 'required|in:cash,card,wave,orange_money,momo,moov,mixx,other',
+            'method'       => 'required|in:cash,card,wave,orange_money,momo,moov,tmoney,mixx,other',
             'reference'    => 'nullable|string',
             'amount_given' => 'nullable|numeric|min:0',
             'customer_name' => 'nullable|string|max:150',
             'customer_phone' => 'nullable|string|max:20',
+            'loyalty_token'  => 'nullable|string',
         ]);
 
         $order = Order::findOrFail($request->order_id);
@@ -36,6 +37,9 @@ class PaymentController extends Controller
         abort_if(!$session, 422, 'Aucune session de caisse ouverte. Veuillez ouvrir une session de caisse avant d\'encaisser.');
 
         DB::transaction(function () use ($request, $order, $session) {
+            $order->recalculate();
+            $order->refresh();
+            
             $changeGiven = null;
             if ($request->input('method') === 'cash' && $request->amount_given) {
                 $changeGiven = max(0, $request->amount_given - $request->amount);
@@ -47,6 +51,9 @@ class PaymentController extends Controller
                     'customer_name' => $request->customer_name,
                     'customer_phone' => $request->customer_phone ?? $order->customer_phone
                 ]);
+            }
+            if ($request->loyalty_token) {
+                $order->update(['loyalty_token' => $request->loyalty_token]);
             }
 
             $payment = Payment::create([
@@ -63,8 +70,10 @@ class PaymentController extends Controller
 
             $amountPaid = (float) $order->payments()->sum('amount');
             // Ajout d'une tolérance de rounding (1 unité de devise) pour marquer comme payé
+            \Illuminate\Support\Facades\Log::info("Payment Check Order #{$order->id}: Paid={$amountPaid}, Total={$order->total}");
             if ($amountPaid >= ($order->total - 1)) {
                 $order->update(['status' => 'paid', 'paid_at' => now(), 'cashier_id' => Auth::id()]);
+                \Illuminate\Support\Facades\Log::info("Order #{$order->id} marked as PAID");
 
                 if ($order->table_id) {
                     \App\Models\Table::where('id', $order->table_id)->update([
@@ -80,6 +89,10 @@ class PaymentController extends Controller
                     ->update(['status' => 'served', 'served_at' => now()]);
 
                 ProcessStockDeduction::dispatch($order);
+
+                if ($order->loyalty_token) {
+                    \App\Jobs\ProcessLoyaltyWebhook::dispatch($order);
+                }
             }
 
             $order->logActivity('payment', "Paiement de {$request->amount} FCFA par {$request->input('method')}");
@@ -97,9 +110,10 @@ class PaymentController extends Controller
             'order_id'     => 'required|exists:orders,id',
             'payments'     => 'required|array|min:1',
             'payments.*.amount' => 'required|numeric|min:0.01',
-            'payments.*.method' => 'required|in:cash,card,wave,orange_money,momo,moov,mixx,other',
+            'payments.*.method' => 'required|in:cash,card,wave,orange_money,momo,moov,tmoney,mixx,other',
             'payments.*.reference' => 'nullable|string',
             'customer_name' => 'nullable|string|max:150',
+            'loyalty_token'  => 'nullable|string',
         ]);
 
         $order = Order::findOrFail($request->order_id);
@@ -128,6 +142,9 @@ class PaymentController extends Controller
             if ($request->customer_name) {
                 $updateData['customer_name'] = $request->customer_name;
             }
+            if ($request->loyalty_token) {
+                $updateData['loyalty_token'] = $request->loyalty_token;
+            }
             $order->update($updateData);
 
             if ($order->table_id) {
@@ -135,6 +152,10 @@ class PaymentController extends Controller
             }
 
             ProcessStockDeduction::dispatch($order);
+
+            if ($order->loyalty_token) {
+                \App\Jobs\ProcessLoyaltyWebhook::dispatch($order);
+            }
 
             $order->logActivity('payment_split', "Paiement multiple : " . collect($request->payments)->map(fn($p) => "{$p['amount']} FCFA par {$p['method']}")->join(', '));
         });

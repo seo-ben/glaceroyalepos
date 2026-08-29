@@ -130,8 +130,29 @@ class AuthController extends Controller
             'password' => Hash::make($request->password),
         ]);
 
+        // Révoquer toutes les sessions existantes de l'utilisateur pour forcer une reconnexion
+        $request->user()->tokens()->delete();
+
         $request->user()->logActivity('password_changed', 'Mot de passe modifié');
 
         return response()->json(['message' => 'Mot de passe modifié avec succès.']);
+    }
+    public function validateAdminPin(Request $request)
+    {
+        $request->validate([
+            'pin' => 'required|string|min:4|max:6',
+        ]);
+
+        $isAdmin = User::where('restaurant_id', $request->user()->restaurant_id)
+            ->where('active', true)
+            ->get()
+            ->filter(fn($u) => $u->hasRole('admin'))
+            ->first(fn($u) => Hash::check($request->pin, $u->pin));
+
+        if (!$isAdmin) {
+            return response()->json(['message' => 'PIN Admin incorrect.'], 403);
+        }
+
+        return response()->json(['success' => true]);
     }
 }

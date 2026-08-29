@@ -34,5 +34,9 @@ return [
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
+    'loyalty' => [
+        'api_url' => env('LOYALTY_API_URL', 'http://127.0.0.1:8001/api'),
+        'webhook_secret' => env('LOYALTY_WEBHOOK_SECRET'),
+    ],
 
 ];

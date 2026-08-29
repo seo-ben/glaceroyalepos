@@ -12,7 +12,7 @@
             <h1 style="margin: 0; color: #f97316; font-size: 26px; text-transform: uppercase;">{{ $restaurant->name }}</h1>
             <p style="margin: 5px 0 0; color: #6b7280; font-size: 14px;">Rapport Financier Journalier</p>
             <div style="margin-top: 15px;">
-                <span style="background: #f1f5f9; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; color: #64748b;">SESSION #{{ $session->id }}</span>
+                <span style="background: #f1f5f9; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; color: #64748b;">SESSION</span>
             </div>
             <p style="margin: 10px 0 0; font-weight: bold; font-size: 18px;">{{ $session->opened_at ? $session->opened_at->format('d/m/Y') : '' }}</p>
             <p style="margin: 5px 0 0; color: #4b5563; font-size: 14px;">Caissier : <strong>{{ strtoupper($session->user->first_name) }}</strong></p>
@@ -83,6 +83,8 @@
                         @if($p->method === 'cash') ESPÈCES
                         @elseif($p->method === 'card') CARTE BANCAIRE
                         @elseif($p->method === 'wave') WAVE
+                        @elseif($p->method === 'moov') MOOV
+                        @elseif($p->method === 'tmoney') T-MONEY
                         @elseif($p->method === 'orange_money') ORANGE MONEY
                         @elseif($p->method === 'momo') MTN MOMO
                         @else {{ strtoupper($p->method) }} @endif
@@ -91,6 +93,18 @@
                     <td style="padding: 10px 15px; border-bottom: 1px solid #f1f5f9; text-align: right; font-weight: bold;">{{ number_format((float)$p->total, 0, ',', ' ') }} FCFA</td>
                 </tr>
                 @endforeach
+                @if(isset($cake_orders_total) && $cake_orders_total > 0)
+                <tr style="background: #f0fdf4;">
+                    <td colspan="2" style="padding: 10px 15px; border-bottom: 1px solid #dcfce7; font-weight: bold; color: #166534;">DONT COMMANDES GÂTEAUX (Inclus ci-dessus)</td>
+                    <td style="padding: 10px 15px; border-bottom: 1px solid #dcfce7; text-align: right; font-weight: bold; color: #166534;">{{ number_format((float)$cake_orders_total, 0, ',', ' ') }} FCFA</td>
+                </tr>
+                @endif
+                @if(isset($gozem_orders_total) && $gozem_orders_total > 0)
+                <tr style="background: #fff7ed;">
+                    <td colspan="2" style="padding: 10px 15px; border-bottom: 1px solid #ffedd5; font-weight: bold; color: #9a3412;">DONT COMMANDES GOZEM (Total)</td>
+                    <td style="padding: 10px 15px; border-bottom: 1px solid #ffedd5; text-align: right; font-weight: bold; color: #9a3412;">{{ number_format((float)$gozem_orders_total, 0, ',', ' ') }} FCFA</td>
+                </tr>
+                @endif
             </tbody>
         </table>
 

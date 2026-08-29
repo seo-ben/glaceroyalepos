@@ -11,10 +11,11 @@ class Category extends Model
 
     const AUDIT_MODULE = 'category';
 
-    protected $fillable = ['restaurant_id', 'parent_id', 'name', 'image', 'order', 'active', 'destination', 'color'];
+    protected $fillable = ['restaurant_id', 'parent_id', 'name', 'image', 'order', 'active', 'is_promo_exempt', 'destination', 'color'];
 
     protected $casts = [
-        'active' => 'boolean',
+        'active'          => 'boolean',
+        'is_promo_exempt' => 'boolean',
     ];
 
     // Labels destination

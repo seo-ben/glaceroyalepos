@@ -76,11 +76,50 @@ class ExpenseController extends Controller
         return response()->json($expense->load('user:id,first_name,last_name'), 201);
     }
 
+    /** Modifier une dépense (Admin uniquement) */
+    public function update(Request $request, Expense $expense)
+    {
+        abort_if($expense->restaurant_id !== $request->user()->restaurant_id, 403);
+        abort_unless($request->user()->isManager() || $request->user()->hasRole('cashier'), 403, 'Accès refusé : Seul un Admin, Manager ou Caissier peut modifier une dépense.');
+
+        $request->validate([
+            'category'       => 'required|string',
+            'description'    => 'nullable|string|max:255',
+            'amount'         => 'required|numeric|min:0.01',
+            'beneficiary'    => 'nullable|string|max:255',
+            'agent_name'     => 'nullable|string|max:255',
+            'notes'          => 'nullable|string',
+        ]);
+
+        $oldAmount = $expense->amount;
+
+        $expense->update([
+            'category'    => $request->category,
+            'description' => $request->description ?: $expense->description,
+            'amount'      => $request->amount,
+            'beneficiary' => $request->beneficiary,
+            'agent_name'  => $request->agent_name,
+            'notes'       => $request->notes,
+        ]);
+
+        // Recalculer le total de la session si rattachée
+        if ($expense->cash_session_id) {
+            $session = CashSession::find($expense->cash_session_id);
+            $session?->update([
+                'total_expenses' => $session->expenses()->sum('amount'),
+            ]);
+        }
+
+        $expense->logActivity('expense_updated', "Dépense modifiée: {$expense->description} — Ancien montant: {$oldAmount} FCFA → Nouveau: {$expense->amount} FCFA");
+
+        return response()->json($expense->load('user:id,first_name,last_name'));
+    }
+
     /** Supprimer une dépense (Admin uniquement) */
     public function destroy(Request $request, Expense $expense)
     {
         abort_if($expense->restaurant_id !== $request->user()->restaurant_id, 403);
-        abort_unless($request->user()->isManager(), 403, 'Manager requis.');
+        abort_unless($request->user()->isManager() || $request->user()->hasRole('cashier'), 403, 'Accès refusé : Seul un Admin, Manager ou Caissier peut supprimer une dépense.');
 
         $request->validate(['reason' => 'required|string|min:5']);
 
@@ -114,9 +153,15 @@ class ExpenseController extends Controller
     /**
      * Reçu de dépense format PDF VÉRITABLE (DomPDF) avec FILIGRANE
      */
-    public function receipt(Expense $expense)
+    public function receipt(Request $request, Expense $expense)
     {
         $expense->load(['user', 'restaurant', 'cashSession']);
+
+        if ($request->query('format') === 'html') {
+            $html = app(\App\Services\TicketPrintService::class)->expenseReceiptHtml($expense);
+            return response()->json(['html' => $html]);
+        }
+
         $restaurantName = $expense->restaurant->name ?? 'SMARTFLOW POS';
 
         $html = "
@@ -162,7 +207,7 @@ class ExpenseController extends Controller
             <div class='container'>
                 <div class='header'>
                     <div class='title'>Justificatif de Sortie de Caisse</div>
-                    <div class='ref'>Référence : EXP-" . str_pad($expense->id, 6, '0', STR_PAD_LEFT) . " • Émis le " . $expense->created_at->format('d/m/Y à H:i') . "</div>
+                    <div class='ref'>Référence : EXP-" . str_pad($expense->id, 6, '0', STR_PAD_LEFT) . " • Émis le " . \Carbon\Carbon::parse($expense->created_at)->format('d/m/Y à H:i') . "</div>
                 </div>
 
                 <table class='table-info'>
@@ -213,7 +258,9 @@ class ExpenseController extends Controller
         </body>
         </html>";
 
-        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadHTML($html);
-        return $pdf->download("Recu_Depense_EXP_" . $expense->id . ".pdf");
+        $pdfContent = app(\App\Services\TicketPrintService::class)->generateExpenseA4Pdf($expense);
+        return response($pdfContent)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', 'inline; filename="Recu_Depense_EXP_' . $expense->id . '.pdf"');
     }
 }

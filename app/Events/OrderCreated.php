@@ -12,7 +12,7 @@ class OrderCreated implements ShouldBroadcast
 {
     use InteractsWithSockets, SerializesModels;
 
-    public function __construct(public Order $order) {}
+    public function __construct(public Order $order, public array $tickets = []) {}
 
     public function broadcastOn(): array
     {
@@ -29,11 +29,17 @@ class OrderCreated implements ShouldBroadcast
         return [
             'order_id'     => $this->order->id,
             'order_number' => $this->order->order_number,
+            'type'         => $this->order->type, // Ajout du type global
             'table'        => $this->order->table?->only(['id', 'number']),
             'items'        => $this->order->items->map(fn($i) => [
-                'id' => $i->id, 'name' => $i->product->name,
-                'quantity' => $i->quantity, 'notes' => $i->notes, 'course' => $i->course,
+                'id' => $i->id, 
+                'name' => $i->product?->name ?? $i->notes ?? 'Article',
+                'quantity' => $i->quantity, 
+                'notes' => $i->notes, 
+                'course' => $i->course,
+                'is_takeaway' => $i->is_takeaway, // Ajout du flag par item
             ]),
+            'tickets'      => $this->tickets,
         ];
     }
 }

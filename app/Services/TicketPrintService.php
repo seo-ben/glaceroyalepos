@@ -3,1042 +3,891 @@
 namespace App\Services;
 
 use App\Models\Order;
-use App\Models\CashSession;
-use App\Services\OrderRoutingService;
-use App\Libraries\Fpdf;
+use App\Models\OrderItem;
+use App\Models\OrderItemNote;
+use App\Models\Restaurant;
+use App\Models\Table;
+use App\Models\CakeOrder;
+use App\Models\Expense;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Support\Collection;
 
-/**
- * TicketPrintService
- * Génère le HTML des tickets d'impression:
- * - Ticket cuisine/bar/pizza (SANS prix) format 58mm
- * - Reçu client (AVEC prix) format 58mm
- * - Facture A4 normalisée
- */
 class TicketPrintService
 {
-    public function __construct(
-        protected OrderRoutingService $routing
-    ) {}
+    public function __construct(protected OrderRoutingService $routing) {}
 
     /**
-     * Ticket destination (cuisine/bar/pizza) — SANS PRIX
-     * Format 58mm pour imprimante thermique
+     * Construit les données formatées pour un reçu (Noir & Blanc)
      */
-    public function kitchenTicketHtml(Order $order, string $destination = 'kitchen'): string
+    public function buildReceiptData(Order $order, $restaurant, array $config): array
     {
-        $order->loadMissing([
-            'items.product.category',
-            'table',
-            'waiter',
-        ]);
+        $currencySymbol = $config['currency_symbol'] ?? 'FCFA';
+        $currencyPosition = $config['currency_position'] ?? 'after';
+        $formatAmount = fn($amount) => $currencyPosition === 'before'
+            ? "{$currencySymbol} " . number_format($amount, 0, '.', ' ')
+            : number_format($amount, 0, '.', ' ') . " {$currencySymbol}";
 
-        // Filtrer uniquement les items de cette destination
+        $lines = $order->items->map(function ($item) use ($formatAmount) {
+            $modifiers = $item->modifiers->map(fn($m) => [
+                'name' => $m->modifier->name, 
+                'extra_price' => $m->extra_price, 
+                'extra_fmt' => $m->extra_price > 0 ? '+' . number_format($m->extra_price, 0) : ''
+            ])->toArray();
+            $lineTotal = ($item->unit_price * $item->quantity) + collect($modifiers)->sum('extra_price') * $item->quantity;
+            return [
+                'name' => $item->product?->name ?? $item->notes ?? 'ARTICLE LIBRE', 
+                'quantity' => $item->quantity, 
+                'unit_price' => $item->unit_price, 
+                'unit_fmt' => $formatAmount($item->unit_price), 
+                'total' => $lineTotal, 
+                'total_fmt' => $formatAmount($lineTotal), 
+                'notes' => $item->notes, 
+                'modifiers' => $modifiers
+            ];
+        })->toArray();
+
+        $paymentLines = $order->payments->map(fn($p) => [
+            'method' => $this->methodLabel($p->method), 
+            'amount' => $p->amount, 
+            'amount_fmt' => $formatAmount($p->amount), 
+            'reference' => $p->reference, 
+            'amount_given' => $p->amount_given, 
+            'change_given' => $p->change_given, 
+            'change_fmt' => $p->change_given ? $formatAmount($p->change_given) : null
+        ])->toArray();
+
+        $isGozem = ($order->type === 'gozem');
+        $displaySubtotal = $order->subtotal;
+        $displayDiscount = $order->discount_amount;
+
+        if ($isGozem) {
+            $displaySubtotal = $order->total;
+            $displayDiscount = 0;
+        }
+
+        $discountLabel = $order->discount_reason ?: "REMISE";
+        if ($order->discount_authorizer_name) {
+            $discountLabel .= " (Par: {$order->discount_authorizer_name})";
+        }
+
+        return [
+            'restaurant' => [
+                'name' => $restaurant->name, 
+                'logo' => $restaurant->logo ? asset('storage/' . $restaurant->logo) : null, 
+                'logo_raw' => $restaurant->logo,
+                'address' => $restaurant->address, 
+                'phone' => $restaurant->phone, 
+                'email' => $restaurant->email, 
+                'vat_number' => $restaurant->vat_number,
+                'receipt_subtitle' => data_get($restaurant->settings, 'receipt_subtitle')
+            ],
+            'order' => [
+                'id' => $order->id, 
+                'number' => $order->order_number, 
+                'date' => \Carbon\Carbon::parse($order->created_at)->format('d/m/Y'), 
+                'time' => \Carbon\Carbon::parse($order->created_at)->format('H:i'), 
+                'paid_at' => $order->paid_at?->format('d/m/Y H:i'), 
+                'table_number' => $order->table?->number, 
+                'covers' => $order->covers, 
+                'type' => $order->type, 
+                'type_label' => $this->typeLabel($order->type), 
+                'waiter' => $order->server_name ?: $order->waiter?->full_name, 
+                'cashier' => $order->cashier?->full_name,
+                'customer_name' => $order->customer_name,
+                'customer_phone' => $order->customer_phone,
+                'notes' => $order->notes
+            ],
+            'lines' => $lines,
+            'totals' => [
+                'subtotal' => $displaySubtotal, 
+                'subtotal_fmt' => $formatAmount($displaySubtotal), 
+                'discount' => $displayDiscount, 
+                'discount_fmt' => $displayDiscount > 0 ? '-' . $formatAmount($displayDiscount) : null, 
+                'discount_reason' => $discountLabel, 
+                'vat_rate' => $config['default_vat_rate'] ?? 18, 
+                'vat_amount' => $order->vat_amount, 
+                'vat_fmt' => $formatAmount($order->vat_amount), 
+                'total' => $order->total, 
+                'total_fmt' => $formatAmount($order->total), 
+                'amount_paid' => $order->amountPaid(), 
+                'amount_paid_fmt' => $formatAmount($order->amountPaid()), 
+                'change' => $order->payments->sum('change_given'), 
+                'change_fmt' => $formatAmount($order->payments->sum('change_given'))
+            ],
+            'payments' => $paymentLines,
+            'footer' => [
+                'message' => $config['receipt_footer'] ?? 'Merci de votre visite !', 
+                'website' => $config['receipt_website'] ?? null, 
+                'show_logo' => $config['receipt_logo'] ?? true, 
+                'width' => $config['receipt_width'] ?? '80mm'
+            ],
+            'generated_at' => now()->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Ticket de cuisine filtré par destination - NOIR & BLANC
+     */
+    public function kitchenTicketHtml(Order $order, string $destination = 'kitchen', ?array $itemIds = null): string
+    {
+        $order->loadMissing(['items.product.category', 'table', 'waiter']);
         $filteredItems = $order->items->whereNotIn('status', ['cancelled']);
-        $allGroups = $this->routing->groupByDestination($filteredItems);
-        $items = $allGroups[$destination] ?? collect();
+        if ($itemIds) { $filteredItems = $filteredItems->whereIn('id', $itemIds); }
 
+        $allGroups = $this->routing->groupByDestination(collect($filteredItems));
+        $items = $allGroups[$destination] ?? collect();
         if ($items->isEmpty()) return '';
 
-        $label = $this->routing->destinationLabel($destination);
-        $icon  = $this->routing->destinationIcon($destination);
-        
-        $locationLabel = '';
-        if ($order->table instanceof \App\Models\Table) {
-            $locationLabel = "TABLE " . $order->table->number;
-        } else {
-            $locationLabel = strtoupper($order->type === 'gozem' ? 'GOZEM' : ($order->type === 'takeaway' ? 'À EMPORTER' : 'VENTE DIRECTE'));
-        }
-        
-        $time  = now()->format('H:i');
-        $date  = now()->format('d/m/Y');
-
-        $itemsHtml = '';
-        foreach ($items as $item) {
-            $note = $item->notes ? "<div class='note'>⚠ {$item->notes}</div>" : '';
-            $itemsHtml .= "
-            <div class='item'>
-                <span class='qty'>x{$item->quantity}</span>
-                <span class='name'>{$item->product->name}</span>
-                {$note}
-            </div>";
-        }
-
-        $customerInfo = '';
-        if ($order->type === 'gozem' && $order->customer_name) {
-            $customerInfo = "<div class='customer'>Client: {$order->customer_name} | {$order->customer_phone}</div>";
-        }
-
-        $orderNote = $order->notes
-            ? "<div class='order-note'>📝 {$order->notes}</div>"
-            : '';
-
         $restaurant = $order->restaurant;
-        $logoHtml = ($restaurant->logo && file_exists(storage_path('app/public/' . $restaurant->logo)))
-            ? "<img src='{$restaurant->logo_url}' style='max-width:40mm;max-height:15mm;display:block;margin:0 auto 4px'>" 
-            : "";
+        $typeMap = [
+            'dine_in'  => 'SUR PLACE',
+            'takeaway' => 'EMPORTER',
+            'delivery' => 'LIVRAISON',
+            'gozem'    => 'GOZEM'
+        ];
+        $tableLabel = ($order->table instanceof \App\Models\Table) 
+            ? "TABLE " . $order->table->number 
+            : ($typeMap[$order->type] ?? strtoupper($order->type));
+        $date = now()->format('d/m H:i');
 
-        $restaurant = $order->restaurant;
-        $restoPhone = $restaurant->phone ? " | Tél: {$restaurant->phone}" : '';
-        
-        return "<!DOCTYPE html>
-<html>
-<head>
-<meta charset='UTF-8'>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Courier New', monospace; font-size: 13px; width: 100%; max-width: 80mm; margin: 0 auto; padding: 4px; overflow: hidden; position: relative; }
-  .header { text-align: center; border-bottom: 2px dashed #000; padding-bottom: 6px; margin-bottom: 6px; position: relative; }
-  .destination { font-size: 18px; font-weight: bold; letter-spacing: 2px; }
-  .order-num { font-size: 12px; margin-top: 2px; font-weight: bold; }
-  .meta { font-size: 11px; color: #000; font-weight: 800; border: 1px solid #000; display: inline-block; padding: 2px 8px; margin-top: 4px; }
-  .divider { border-top: 1px dashed #000; margin: 4px 0; }
-  .item { display: flex; gap: 8px; padding: 5px 0; align-items: flex-start; border-bottom: 0.5px solid #eee; }
-  .qty { font-weight: 900; font-size: 18px; min-width: 25px; }
-  .name { font-size: 14px; font-weight: 900; flex: 1; text-transform: uppercase; }
-  .note { font-size: 11px; color: #000; padding-left: 33px; font-weight: bold; font-style: italic; }
-  .customer { margin-top: 8px; font-size: 10px; border-top: 1px dashed #000; padding-top: 4px; }
-  .order-note { font-size: 12px; font-weight: bold; border: 2px solid #000; padding: 4px; margin-top: 6px; }
-  .footer-name { text-align: center; font-size: 10px; font-weight: bold; margin-top: 10px; text-transform: uppercase; border-top: 1px solid #000; padding-top: 4px; }
-  @media print { @page { margin: 0; } }
-</style>
-</head>
-<body>
-  {$logoHtml}
-  <div class='header'>
-    <div class='destination'>{$icon} {$label}</div>
-    <div class='order-num'>#{$order->order_number}</div>
-    <div class='meta'>IFU: 1001580865 | {$locationLabel}{$restoPhone}</div>
-  </div>
-  <div class='items'>
-    {$itemsHtml}
-  </div>
-  {$orderNote}
-  {$customerInfo}
-  <div class='footer-name'>
-    {$restaurant->name}
-    " . (data_get($restaurant->settings, 'receipt_subtitle') ? "<br><span style='font-size:8px;font-weight:normal'>" . data_get($restaurant->settings, 'receipt_subtitle') . "</span>" : "") . "
-    <br>Omega POS
-  </div>
-</body>
-</html>";
+        return "
+        <div style='font-family: \"DejaVu Sans\", sans-serif; width: 100%; font-size: 13px; color: #000; line-height: 1.25;'>
+            <div style='text-align: center; font-weight: bold; border-bottom: 1px solid #000; padding-bottom: 2px; margin-bottom: 2px;'>
+                " . strtoupper($restaurant->name) . " - " . strtoupper($this->routing->destinationLabel($destination)) . "
+            </div>
+            <div style='text-align: center; font-size: 11px;'>{$order->order_number} | {$date}</div>
+            <div style='text-align: center; font-size: 12px; font-weight: bold; margin-top: 2px;'>SERVEUR: " . strtoupper($order->server_name ?: $order->waiter?->full_name ?: 'N/A') . "</div>
+
+            <div style='border: 2px solid #000; text-align: center; font-size: 24px; font-weight: bold; margin: 3px 0;'>
+                {$tableLabel}
+            </div>
+
+            " . ($order->notes ? "<div style='border: 2px dashed #000; padding: 5px; text-align: center; font-size: 14px; font-weight: bold; margin: 5px 0;'>COMMENTAIRE: {$order->notes}</div>" : "") . "
+
+            <table style='width: 100%; border-collapse: collapse;'>
+                " . $items->map(fn($item) => "
+                <tr style='border-bottom: 1px dashed #000;'>
+                    <td style='padding: 6px 0;'>
+                        <div style='display: flex; justify-content: space-between; align-items: baseline;'>
+                            <span style='font-size: 14px; font-weight: bold;'>
+                                " . strtoupper($item->product?->name ?? $item->notes ?? 'ARTICLE LIBRE') . "
+                                " . ($item->is_takeaway ? "<span style='color: #000; background: #eee; padding: 0 4px; margin-left: 5px; border: 1px solid #000;'>[A EMPORTER]</span>" : "") . "
+                            </span>
+                            <span style='flex-grow: 1; border-bottom: 1px dotted #aaa; margin: 0 5px; height: 10px;'></span>
+                            <span style='font-size: 16px; font-weight: 900;'>{$item->quantity}</span>
+                        </div>
+                        " . ($item->modifiers && $item->modifiers->count() > 0 ? "
+                            <div style='font-size: 11px; font-weight: bold; margin-left: 10px; color: #333;'>
+                                " . $item->modifiers->map(fn($m) => "• " . strtoupper($m->modifier?->name ?? 'OPTION'))->implode('<br>') . "
+                            </div>" : "") . "
+                        " . ($item->notes ? "<div style='font-size: 10px; font-weight: bold; font-style: italic; color: #666; margin-top: 2px;'>* {$item->notes}</div>" : "") . "
+                    </td>
+                </tr>")->implode('') . "
+            </table>
+            <div style='margin-top: 5px; text-align: center; font-size: 10px; font-weight: bold;'>*** FIN ***</div>
+        </div>";
     }
 
     /**
-     * Reçu client avec prix — format 58mm
+     * Reçu de dépense - NOIR & BLANC
      */
-    public function receiptHtml(Order $order): string
+    public function expenseReceiptHtml($expense): string
     {
-        $order->loadMissing(['items.product', 'table', 'restaurant', 'payments', 'waiter']);
-        $restaurant = $order->restaurant;
-        $items = $order->items->whereNotIn('status', ['cancelled']);
+        $restaurant = $expense->restaurant;
+        $date = \Carbon\Carbon::parse($expense->created_at)->format('d/m/y H:i');
+        $id = str_pad($expense->id, 4, '0', STR_PAD_LEFT);
 
-        $itemsHtml = '';
-        foreach ($items as $item) {
-            $subtotal  = number_format((float) ($item->quantity * $item->unit_price), 0, ',', ' ');
-            $itemsHtml .= "
-            <div class='line'>
-                <span>{$item->quantity}x {$item->product->name}</span>
-                <span>{$subtotal}</span>
-            </div>";
-        }
+        return "
+        <div style='font-family: \"DejaVu Sans\", sans-serif; width: 100%; font-size: 11px; color: #000; line-height: 1.1;'>
+            <div style='text-align: center; font-weight: bold; border-bottom: 1px dashed #000; padding-bottom: 2px;'>" . strtoupper($restaurant->name) . "</div>
+            <div style='text-align: center; font-weight: bold; margin: 3px 0;'>BON DE DEPENSE</div>
+            
+            <div style='font-size: 10px; margin-bottom: 3px;'>
+                <b>DATE:</b> {$date} | <b>AGENT:</b> " . strtoupper($expense->user->first_name) . "
+            </div>
 
-        $paymentsHtml = '';
-        foreach ($order->payments as $pmt) {
-            $method = strtoupper($pmt->method);
-            $amt    = number_format($pmt->amount, 0, ',', ' ');
-            $paymentsHtml .= "<div class='line'><span>{$method}</span><span>{$amt} FCFA</span></div>";
+            <div style='margin-bottom: 3px;'>
+                <b>MOTIF:</b> " . strtoupper($expense->description) . "<br>
+                <b>POUR:</b> " . strtoupper($expense->beneficiary ?: 'N/A') . "
+            </div>
 
-        }
-        $totalGiven = $order->payments->sum('amount_given');
-        $totalChange = $order->payments->sum('change_given');
-        $givenChangeHtml = '';
-        if ($totalGiven > 0) {
-            $fmtGiven = number_format($totalGiven, 0, ',', ' ');
-            $fmtChange = number_format($totalChange, 0, ',', ' ');
-            $givenChangeHtml = "
-            <div class='divider'></div>
-            <div style='border:2px solid #000;padding:4px;margin:4px 0'>
-              <div class='line total-line'><span>DONNÉ</span><span>{$fmtGiven} FCFA</span></div>
-              <div class='line total-line'><span>RENDU</span><span>{$fmtChange} FCFA</span></div>
-            </div>";
-        }
+            <div style='text-align: center; border: 1px solid #000; padding: 3px; font-size: 16px; font-weight: bold;'>
+                " . number_format($expense->amount, 0, ',', ' ') . " F
+            </div>
 
-        $typeLabel = match($order->type) {
-            'dine_in'  => 'Sur place',
-            'takeaway' => 'À emporter',
-            'gozem'    => 'Livraison (Gozem)',
-            default    => ucfirst($order->type),
-        };
-        $tableLabel  = $order->table ? "Table {$order->table->number}" : $typeLabel;
-        $subtotal    = number_format((float) ($order->subtotal ?? 0), 0, ',', ' ');
-        $discountRow = '';
-        if ($order->discount_amount > 0) {
-            $disc = number_format((float) $order->discount_amount, 0, ',', ' ');
-            $discountRow = "<div class='line'><span>Remise</span><span>-{$disc} FCFA</span></div>";
-        }
-        $vatRate     = $restaurant->settings['default_vat_rate'] ?? 18;
-        $vat         = number_format((float) ($order->vat_amount ?? 0), 0, ',', ' ');
-        $total       = number_format((float) ($order->total ?? 0), 0, ',', ' ');
-        $date        = now()->format('d/m/Y H:i');
-        $serveur     = $order->waiter ? ($order->waiter->first_name . ' ' . $order->waiter->last_name) : null;
-        $restoAddress = $restaurant->address ?? '';
-
-        $logoHtml = ($restaurant->logo && file_exists(storage_path('app/public/' . $restaurant->logo)))
-            ? "<img src='{$restaurant->logo_url}' style='max-width:40mm;max-height:15mm;display:block;margin:0 auto 4px'>" 
-            : "";
-
-
-        $thanksMsg   = $restaurant->settings['thank_you_message'] ?? 'Merci de votre visite !';
-
-        return "<!DOCTYPE html>
-<html>
-<head>
-<meta charset='UTF-8'>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Courier New', monospace; font-size: 11px; width: 100%; max-width: 80mm; margin: 0 auto; padding: 4px; position: relative; overflow: hidden; }
-  .header { text-align: center; margin-bottom: 6px; border-bottom: 1px dashed #000; padding-bottom: 4px; }
-  .resto-name { font-size: 15px; font-weight: bold; text-transform: uppercase; }
-  .line { display: flex; justify-content: space-between; padding: 2px 0; }
-  .divider { border-top: 1px dashed #000; margin: 4px 0; }
-  .total-line { font-weight: bold; font-size: 14px; }
-  .footer { text-align: center; margin-top: 10px; font-size: 10px; font-weight: bold; border-top: 1px dashed #000; padding-top: 4px; }
-  .table-box { border: 2px solid #000; font-weight: 900; text-align: center; padding: 4px; margin: 4px 0; font-size: 14px; }
-  .paid-stamp { position: fixed; top: 30%; left: 50%; transform: translate(-50%, -50%) rotate(-30deg); font-size: 42px; font-weight: 900; color: rgba(0,128,0,0.15); padding: 6px 16px; letter-spacing: 4px; pointer-events: none; z-index: -1; }
-  @media print { @page { margin: 0; } }
-</style>
-</head>
-<body>
-  {$logoHtml}
-  <div class='header'>
-    <div class='resto-name'>" . strtoupper($restaurant->name) . "</div>
-    " . (data_get($restaurant->settings, 'receipt_subtitle') ? "<div style='font-size:10px; font-weight:bold; margin-bottom:2px; color:#555;'>" . data_get($restaurant->settings, 'receipt_subtitle') . "</div>" : "") . "
-    " . ($restoAddress ? "<div style='font-size:9px'>{$restoAddress}</div>" : "") . "
-    <div style='font-size:10px; font-weight:bold; margin-top:2px;'>IFU : 1001580865</div>
-    " . ($restaurant->phone ? "<div style='font-size:9px'>Tél: {$restaurant->phone}</div>" : "") . "
-    <div style='font-size:9px'>{$date}</div>
-  </div>
-  <div class='table-box'>{$tableLabel}</div>
-  <div class='line'><span>Ticket</span><span>#{$order->order_number}</span></div>
-  " . ($serveur ? "<div class='line'><span>Serveur</span><span>{$serveur}</span></div>" : "") . "
-  <div class='divider'></div>
-  {$itemsHtml}
-  <div class='totals'>
-    <div class='line'><span>Sous-total</span><span>{$subtotal} FCFA</span></div>
-    {$discountRow}
-    <div class='line total-line'><span>TOTAL TTC</span><span>{$total} FCFA</span></div>
-    <div class='line'><small>Dont TVA ({$vatRate}%)</small><small>{$vat} FCFA</small></div>
-  </div>
-  <div class='divider'></div>
-  {$givenChangeHtml}
-  " . ($order->paid_at ? "<div class='paid-stamp'>PAYÉ</div>" : "") . "
-  <div class='footer'>
-    {$thanksMsg}<br>{$restaurant->name}
-    <div style='margin-top:8px;'>
-      <div style='font-size:8px; font-weight:bold; margin-bottom:2px;'>Hello, Scan moi</div>
-      <img src='/img/website_qr.png' style='width:22mm; height:22mm; display:block; margin:0 auto;'>
-    </div>
-  </div>
-</body>
-</html>";
+            <div style='margin-top: 10px; border-top: 1px dashed #000; padding-top: 2px; text-align: center; font-size: 9px; font-weight: bold;'>
+                SIGNATURE BENEFICIAIRE<br><br>
+                ...........................
+            </div>
+        </div>";
     }
 
     /**
-     * Facture A4 normalisée
+     * Rapport de clôture - NOIR & BLANC
+     */
+    public function sessionReportHtml($session): string
+    {
+        $restaurant = $session->restaurant;
+        $open = $session->opened_at->format('d/m H:i');
+        $close = $session->closed_at ? $session->closed_at->format('d/m H:i') : 'ACTIF';
+
+        $html = "
+        <div style='font-family: \"DejaVu Sans\", sans-serif; width: 100%; font-size: 10px; color: #000; line-height: 1.1;'>
+            <div style='text-align: center; font-weight: bold; font-size: 12px;'>" . strtoupper($restaurant->name) . "</div>
+            <div style='text-align: center; border-bottom: 1px solid #000; padding-bottom: 1px; margin-bottom: 3px; font-weight: bold;'>CLOTURE</div>
+            
+            <div style='margin-bottom: 3px;'>
+                <b>AGENT:</b> " . strtoupper($session->user->first_name) . "<br>
+                <b>PERIODE:</b> {$open} au {$close}
+            </div>
+
+            <div style='border-bottom: 1px solid #000; font-weight: bold; margin-bottom: 1px;'>FLUX CASH</div>
+            <table style='width: 100%; border-collapse: collapse;'>
+                <tr><td>OUVERTURE:</td><td style='text-align: right;'>" . number_format($session->opening_amount, 0, ',', ' ') . "</td></tr>
+                <tr><td>VENTES (+):</td><td style='text-align: right;'>" . number_format($session->cash_total, 0, ',', ' ') . "</td></tr>
+                <tr><td>DEPENSES (-):</td><td style='text-align: right;'>" . number_format($session->total_expenses, 0, ',', ' ') . "</td></tr>
+                <tr style='font-weight: bold; border-top: 1px solid #000;'><td>THEORIQUE:</td><td style='text-align: right;'>" . number_format($session->expected_amount, 0, ',', ' ') . "</td></tr>
+            </table>
+
+            <div style='border-bottom: 1px solid #000; font-weight: bold; margin-top: 4px; margin-bottom: 1px;'>REEL</div>
+            <table style='width: 100%;'>
+                <tr><td>BANQUE:</td><td style='text-align: right;'>" . number_format($session->amount_to_bank, 0, ',', ' ') . "</td></tr>
+                <tr><td>CAISSE:</td><td style='text-align: right;'>" . number_format($session->remaining_amount, 0, ',', ' ') . "</td></tr>
+                <tr style='font-weight: bold; font-size: 11px; border-top: 1px solid #000;'>
+                    <td>ECART:</td>
+                    <td style='text-align: right;'>" . ($session->difference > 0 ? '+' : '') . number_format($session->difference, 0, ',', ' ') . "</td>
+                </tr>
+            </table>
+
+            <div style='border-bottom: 1px solid #000; font-weight: bold; margin-top: 4px; margin-bottom: 1px;'>AUTRES MODES</div>
+            <table style='width: 100%; border-collapse: collapse;'>";
+        
+        foreach (['card' => 'CARTE', 'wave' => 'WAVE', 'moov' => 'MOOV', 'mixx' => 'MIXX', 'orange_money' => 'ORANGE', 'momo' => 'MOMO'] as $key => $label) {
+            $val = $session->{$key . '_total'} ?? 0;
+            if ($val > 0) {
+                $html .= "<tr><td>{$label}:</td><td style='text-align: right;'>" . number_format($val, 0, ',', ' ') . "</td></tr>";
+            }
+        }
+
+        $gozemVal = $session->gozem_orders_total ?? 0;
+        if ($gozemVal > 0) {
+            $html .= "<tr style='border-top: 1px dotted #000;'><td>DONT GOZEM:</td><td style='text-align: right;'>" . number_format($gozemVal, 0, ',', ' ') . "</td></tr>";
+        }
+        
+        $cakeVal = $session->cake_orders_total ?? 0;
+        if ($cakeVal > 0) {
+            $html .= "<tr style='border-top: 1px dotted #000;'><td>DONT GATEAU:</td><td style='text-align: right;'>" . number_format($cakeVal, 0, ',', ' ') . "</td></tr>";
+        }
+        
+        $qrPath = public_path('img/website_qr.png');
+        $qrBase64 = null;
+        if (file_exists($qrPath)) {
+            $qrData = base64_encode(file_get_contents($qrPath));
+            $qrBase64 = 'data:image/png;base64,' . $qrData;
+        }
+
+        $html .= "</table>";
+        
+        if ($qrBase64) {
+            $html .= "<div style='text-align: center; margin-top: 5px;'>
+                <img src='{$qrBase64}' style='width: 40px; height: 40px; filter: grayscale(100%); display: inline-block;'>
+            </div>";
+        }
+
+        $html .= "<div style='margin-top: 5px; border-top: 1px dashed #000; text-align: center; font-weight: bold; font-size: 8px;'>
+                VISA RESPONSABLE • " . now()->format('d/m/y H:i') . "
+            </div>
+        </div>";
+
+        return $html;
+    }
+
+    /**
+     * Commande de gâteau - NOIR & BLANC
+     */
+    public function cakeOrderHtml($cakeOrder): string
+    {
+        $restaurant = $cakeOrder->restaurant;
+        $deliveryDate = \Carbon\Carbon::parse($cakeOrder->delivery_date)->format('d/m/y');
+        $deliveryTime = $cakeOrder->delivery_time ? " " . substr($cakeOrder->delivery_time, 0, 5) : '';
+
+        // QR Code Base64
+        $qrPath = public_path('img/website_qr.png');
+        $qrBase64 = null;
+        if (file_exists($qrPath)) {
+            $qrData = base64_encode(file_get_contents($qrPath));
+            $qrBase64 = 'data:image/png;base64,' . $qrData;
+        }
+
+        $html = "
+        <div style='font-family: \"DejaVu Sans\", sans-serif; width: 100%; font-size: 10px; color: #000; line-height: 1.1; background: #fff;'>
+            <div style='text-align: center;'>
+                <div style='font-size: 13px; font-weight: bold;'>" . strtoupper($restaurant->name) . "</div>
+                <div style='font-weight: bold; border-top: 1px dashed #000; border-bottom: 1px dashed #000; margin: 3px 0; padding: 2px 0;'>
+                    GATEAU #{$cakeOrder->order_number}
+                </div>
+            </div>
+            
+            <div style='margin: 4px 0; font-weight: bold;'>
+                CLIENT: " . strtoupper($cakeOrder->customer_name) . "<br>
+                TEL: {$cakeOrder->customer_phone} | LE: {$deliveryDate}{$deliveryTime}
+            </div>
+
+            <div style='border-bottom: 1px solid #000; font-weight: bold; margin-bottom: 3px;'>ARTICLES</div>";
+
+        foreach ($cakeOrder->items as $item) {
+            $html .= "
+                <div style='font-weight: bold; margin-bottom: 2px;'>
+                    <div style='display:flex; justify-content:space-between;'>
+                        <span>x{$item['qty']} " . strtoupper($item['name']) . "</span>
+                        <span>" . number_format($item['qty'] * $item['unit_price'], 0, ',', ' ') . "</span>
+                    </div>";
+            if (!empty($item['notes'])) {
+                $html .= "<div style='font-size:10px; font-style:italic; padding-left: 10px;'>- " . $item['notes'] . "</div>";
+            }
+            $html .= "</div>";
+        }
+
+        $html .= "
+            <div style='border-top: 1px dashed #000; margin-top: 5px; padding-top: 5px;'>
+                <table style='width: 100%; font-weight: bold;'>
+                    <tr><td>TOTAL:</td><td style='text-align: right;'>" . number_format($cakeOrder->total, 0, ',', ' ') . "</td></tr>
+                    <tr><td>AVANCE:</td><td style='text-align: right;'>" . number_format($cakeOrder->advance_paid, 0, ',', ' ') . "</td></tr>
+                    <tr style='font-size: 13px;'>
+                        <td style='border: 1px solid #000; padding: 2px;'>RESTE:</td>
+                        <td style='text-align: right; border: 1px solid #000; padding: 2px;'>" . number_format($cakeOrder->remaining_amount, 0, ',', ' ') . " FCFA</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div style='text-align: center; margin-top: 15px;'>
+                <div style='font-weight: bold; margin-bottom: 5px;'>Merci de votre confiance !</div>";
+        
+        if ($qrBase64) {
+            $html .= "<div style='text-align: center; margin-top: 8px;'><img src='{$qrBase64}' style='width: 60px; height: 60px; display: inline-block; filter: grayscale(100%);'></div>";
+        }
+
+        $html .= "
+                <div style='font-size: 9px; margin-top: 5px; font-weight: bold;'>" . now()->format('d/m/Y H:i') . "</div>
+            </div>
+        </div>";
+
+        return $html;
+    }
+
+    /**
+     * Facture A4 sécurisée (Correction erreur de chargement)
      */
     public function invoiceA4Html(Order $order): string
     {
-        $order->loadMissing(['items.product', 'table', 'restaurant', 'payments', 'waiter']);
         $restaurant = $order->restaurant;
-        $items      = $order->items->whereNotIn('status', ['cancelled']);
+        $customer = $order->customer_name ?: 'Client de Passage';
+        $date = \Carbon\Carbon::parse($order->created_at)->format('d/m/Y');
+        $time = \Carbon\Carbon::parse($order->created_at)->format('H:i');
+        $typeLabel = $this->typeLabel($order->type);
+        $waiter = $order->server_name ?: ($order->waiter?->first_name ?? 'N/A');
 
-        $itemsHtml = '';
-        $i = 1;
-        foreach ($items as $item) {
-            $subtotal = number_format((float) ($item->quantity * $item->unit_price), 0, ',', ' ');
-            $price    = number_format($item->unit_price, 0, ',', ' ');
-            $itemsHtml .= "
-            <tr>
-                <td>{$i}</td>
-                <td>{$item->product->name}</td>
-                <td style='text-align:center'>{$item->quantity}</td>
-                <td style='text-align:right'>{$price}</td>
-                <td style='text-align:right'>{$subtotal}</td>
-            </tr>";
-            $i++;
+        $logoPath = public_path('img/logo.png');
+        $logoHtml = '';
+        if (file_exists($logoPath)) {
+            $logoData = base64_encode(file_get_contents($logoPath));
+            $logoHtml = "<img src='data:image/png;base64,{$logoData}' style='max-height: 60px; margin-bottom: 10px;' /><br>";
         }
 
-        $paymentsHtml = '';
-        foreach ($order->payments as $pmt) {
-            $method = strtoupper($pmt->method);
-            $amt    = number_format($pmt->amount, 0, ',', ' ');
-            $paymentsHtml .= "<tr><td>{$method}</td><td style='text-align:right'>{$amt} FCFA</td></tr>";
+        $html = "
+        <div style='font-family: \"DejaVu Sans\", sans-serif; background: #fff; color: #000; padding: 20px 30px; min-height: 260mm; line-height: 1.2;'>
+
+            <!-- EN-TÊTE -->
+            <table style='width: 100%; margin-bottom: 15px;'>
+                <tr>
+                    <td style='vertical-align: top; width: 60%;'>
+                        {$logoHtml}
+                        <h1 style='margin: 0 0 4px 0; font-size: 18px; letter-spacing: 1px;'>" . strtoupper($restaurant->name) . "</h1>
+                        <p style='margin: 4px 0; font-size: 13px;'>{$restaurant->address}</p>
+                        <p style='margin: 4px 0; font-size: 13px;'>Tél : {$restaurant->phone}</p>
+                        <p style='margin: 4px 0; font-size: 13px; font-weight: bold;'>IFU : 1001580865</p>
+                    </td>
+                    <td style='text-align: right; vertical-align: top;'>
+                        <h2 style='margin: 0 0 8px 0; font-size: 20px; letter-spacing: 2px;'>FACTURE</h2>
+                        <p style='margin: 4px 0; font-size: 13px;'>N° : {$order->order_number}</p>
+                        <p style='margin: 4px 0; font-size: 13px;'>Date : {$date} à {$time}</p>
+                        <p style='margin: 4px 0; font-size: 13px;'>Type : {$typeLabel}</p>
+                        <p style='margin: 4px 0; font-size: 13px;'>Serv : {$waiter}</p>
+                    </td>
+                </tr>
+            </table>
+
+            <div style='border-top: 2px solid #000; margin-bottom: 15px;'></div>
+
+            <!-- CLIENT -->
+            <div style='margin-bottom: 15px; font-size: 12px;'>
+                <strong>DOIT À :</strong><br>
+                <span style='font-size: 14px;'>" . strtoupper($customer) . "</span>" . ($order->customer_phone ? " — {$order->customer_phone}" : '') . "
+            </div>
+
+            <!-- TABLEAU DES ARTICLES -->
+            <table style='width: 100%; border-collapse: collapse; margin-bottom: 25px; font-size: 13px;'>
+                <thead>
+                    <tr style='background: #f0f0f0;'>
+                        <th style='padding: 6px 8px; text-align: left; border: 1px solid #000;'>DÉSIGNATION</th>
+                        <th style='padding: 6px 8px; text-align: center; border: 1px solid #000; width: 80px;'>QTÉ</th>
+                        <th style='padding: 6px 8px; text-align: right; border: 1px solid #000; width: 120px;'>P.U</th>
+                        <th style='padding: 6px 8px; text-align: right; border: 1px solid #000; width: 130px;'>TOTAL</th>
+                    </tr>
+                </thead>
+                <tbody>";
+
+        foreach ($order->items as $item) {
+            if ($item->status === 'cancelled') continue;
+            $lineTotal = $item->unit_price * $item->quantity;
+            $html .= "
+                    <tr>
+                        <td style='padding: 4px 8px; border: 1px solid #000;'>" . strtoupper($item->product?->name ?? $item->notes ?? 'ARTICLE LIBRE') . "</td>
+                        <td style='padding: 4px 8px; text-align: center; border: 1px solid #000;'>{$item->quantity}</td>
+                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format($item->unit_price, 0, ',', ' ') . "</td>
+                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format($lineTotal, 0, ',', ' ') . "</td>
+                    </tr>";
         }
-        $totalGiven = $order->payments->sum('amount_given');
-        $totalChange = $order->payments->sum('change_given');
-        $givenSummaryHtml = '';
-        if ($totalGiven > 0) {
-            $fmtGiven = number_format($totalGiven, 0, ',', ' ');
-            $fmtChange = number_format($totalChange, 0, ',', ' ');
-            $givenSummaryHtml = "
-            <table style='width:50%;margin-top:8px;border-top:1px dashed #ccc;'>
-              <tr><td style='font-weight:bold;padding:6px;border-bottom:1px solid #eee;'>DONNÉ PAR LE CLIENT</td><td style='text-align:right;font-weight:bold;padding:6px;border-bottom:1px solid #eee;'>{$fmtGiven} FCFA</td></tr>
-              <tr><td style='font-weight:bold;padding:6px;'>MONNAIE RENDUE</td><td style='text-align:right;font-weight:bold;padding:6px;'>{$fmtChange} FCFA</td></tr>
-            </table>";
-        }
-        $waiterName = $order->waiter ? ($order->waiter->first_name . ' ' . $order->waiter->last_name) : null;
 
-        $locationLabel = $order->table ? "Table {$order->table->number}" : ucfirst(str_replace('_', ' ', $order->type));
-        $subtotal    = number_format((float) ($order->subtotal ?? 0), 0, ',', ' ');
-        $vatRate     = $restaurant->settings['default_vat_rate'] ?? 18;
-        $vat         = number_format((float) ($order->vat_amount ?? 0), 0, ',', ' ');
-        $discount    = ($order->discount_amount ?? 0) > 0 ? number_format((float) $order->discount_amount, 0, ',', ' ') : null;
-        $total       = number_format((float) ($order->total ?? 0), 0, ',', ' ');
-        $date        = now()->format('d/m/Y H:i');
-        $invoiceNum  = 'INV-' . $order->order_number;
-        $restoAddr   = $restaurant->address ?? '';
-        $restoPhone  = $restaurant->phone ?? '';
+        $html .= "
+                </tbody>
+                <tfoot>
+                    <tr>
+                        <td colspan='3' style='padding: 4px 8px; text-align: right; border: 1px solid #000;'><strong>SOUS-TOTAL (TTC)</strong></td>
+                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format((float)$order->subtotal, 0, ',', ' ') . "</td>
+                    </tr>
+                    " . (($order->discount_amount > 0 && $order->type !== 'gozem') ? "
+                    <tr>
+                        <td colspan='3' style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>
+                            <strong>" . ($order->discount_reason ? $order->discount_reason : "REMISE") . 
+                            ($order->discount_authorizer_name ? " - Par: {$order->discount_authorizer_name}" : "") . "</strong>
+                        </td>
+                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>- " . number_format((float)$order->discount_amount, 0, ',', ' ') . "</td>
+                    </tr>" : "") . "
+                    <tr>
+                        <td colspan='3' style='padding: 4px 8px; text-align: right; border: 1px solid #000;'><strong>TVA (18%)</strong></td>
+                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format((float)($order->vat_amount ?? 0), 0, ',', ' ') . "</td>
+                    </tr>
+                    <tr style='background: #f0f0f0;'>
+                        <td colspan='3' style='padding: 6px 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>TOTAL NET (TTC)</strong></td>
+                        <td style='padding: 6px 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>" . number_format((float)($order->total ?? 0), 0, ',', ' ') . " FCFA</strong></td>
+                    </tr>
+                </tfoot>
+            </table>
 
-        $discountRow = $discount
-            ? "<tr><td>Remise</td><td colspan='3'>{$order->discount_reason}</td><td style='text-align:right'>- {$discount}</td></tr>"
-            : '';
+            <!-- MODE DE PAIEMENT -->
+            " . ($order->payments->count() > 0 ? "
+            <div style='margin-bottom: 20px; font-size: 13px; font-weight: bold; padding: 10px 12px; border: 1px dashed #000;'>
+                MODE DE PAIEMENT : " . $order->payments->map(fn($p) => strtoupper($this->methodLabel($p->method)))->implode(', ') . "
+            </div>" : "") . "
 
-        $customerBlock = '';
-        // Customer name hidden on invoices as requested
+            <!-- MONTANT DONNÉ / RENDU -->
+            " . ($order->payments->sum('amount_given') > 0 ? "
+            <table style='width: 300px; margin-left: auto; border-collapse: collapse; margin-bottom: 25px; font-size: 13px;'>
+                <tr>
+                    <td style='padding: 8px 12px; text-align: right; border: 1px solid #000;'>MONTANT DONNÉ</td>
+                    <td style='padding: 8px 12px; text-align: right; border: 1px solid #000; width: 120px;'>" . number_format($order->payments->sum('amount_given'), 0, ',', ' ') . "</td>
+                </tr>
+                <tr>
+                    <td style='padding: 8px 12px; text-align: right; border: 1px solid #000;'>MONTANT RENDU</td>
+                    <td style='padding: 8px 12px; text-align: right; border: 1px solid #000; width: 120px; font-weight: bold;'>" . number_format($order->payments->sum('change_given'), 0, ',', ' ') . "</td>
+                </tr>
+            </table>" : "") . "
 
-        $logoHtml = ($restaurant->logo && file_exists(storage_path('app/public/' . $restaurant->logo)))
-            ? "<img src='{$restaurant->logo_url}' style='max-height:25mm;'>" 
-            : "";
+            <!-- SIGNATURE -->
+            <div style='margin-top: 60px;'>
+                <div style='text-align: right; font-size: 13px;'>
+                    <p style='margin: 0 0 40px 0;'>La Direction</p>
+                    <p style='margin: 0;'>_________________________</p>
+                </div>
+                <div style='text-align: center; margin-top: 40px; font-size: 11px; color: #555; border-top: 1px solid #999; padding-top: 10px;'>
+                    Merci pour votre confiance ! Certifié par CI GUSTA POS.
+                </div>
+            </div>
+        </div>";
 
-        $thanksMsg   = data_get($restaurant->settings, 'thank_you_message') ?? 'Merci pour votre confiance';
-        $subtitle    = data_get($restaurant->settings, 'receipt_subtitle');
-
-        return "<!DOCTYPE html>
-<html>
-<head>
-<meta charset='UTF-8'>
-<style>
-  body { font-family: Arial, sans-serif; font-size: 11px; color: #222; margin: 10mm 12mm; position: relative; overflow: hidden; }
-  .header { display: flex; justify-content: space-between; margin-bottom: 10px; }
-  .resto-info h1 { font-size: 20px; color: #1a1a2e; margin-bottom: 2px; text-transform: uppercase; }
-  .invoice-info { text-align: right; }
-  .invoice-info h2 { font-size: 18px; color: #16213e; margin-bottom: 6px; }
-  .divider { border: none; border-top: 2px solid #1a1a2e; margin: 6px 0; }
-  .customer-block { padding: 8px 0; margin-bottom: 10px; border-bottom: 1px dashed #ccc; }
-  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-  th { background: transparent; color: #111; padding: 6px 8px; text-align: left; font-size: 10px; font-weight: bold; border-bottom: 2px solid #000; text-transform: uppercase; }
-  td { padding: 5px 8px; border-bottom: 1px solid #eee; }
-  .totals-table td { border: none; padding: 3px 8px; }
-  .total-row td { font-weight: bold; font-size: 14px; border-top: 2px solid #000; padding-top: 6px; }
-  .footer { margin-top: 15px; text-align: center; font-size: 10px; color: #666; border-top: 1px solid #eee; padding-top: 8px; }
-  .table-badge { background: #eee; color: #111; padding: 3px 10px; border-radius: 4px; font-weight: bold; font-size: 12px; border: 1px solid #ccc; }
-  .paid-watermark { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%) rotate(-35deg); font-size: 96px; font-weight: 900; color: rgba(0,128,0,0.1); padding: 15px 50px; letter-spacing: 12px; pointer-events: none; z-index: -1; }
-  .serveur-badge { background: transparent; border: 1px dashed #ccc; padding: 4px 10px; border-radius: 4px; font-size: 11px; display: inline-block; margin-bottom: 8px; }
-  @media print { @page { size: A4; margin: 10mm; } }
-</style>
-</head>
-<body>
-  {$logoHtml}
-  <div class='header'>
-    <div class='resto-info'>
-      <h1>{$restaurant->name}</h1>
-      " . ($subtitle ? "<div style='font-size:12px; font-weight:bold; margin-bottom:5px; color:#555;'>{$subtitle}</div>" : "") . "
-      " . ($restoAddr ? "<div>{$restoAddr}</div>" : "") . "
-      " . ($restoPhone ? "<div>Tél: {$restoPhone}</div>" : "") . "
-      " . ($restaurant->email ? "<div>{$restaurant->email}</div>" : "") . "
-      <div style='font-size:14px; font-weight:bold; margin-top:5px; color:#000;'>IFU : 1001580865</div>
-    </div>
-    <div class='invoice-info'>
-      <h2>FACTURE</h2>
-      <div style='margin-bottom:8px'><span class='table-badge'>{$locationLabel}</span></div>
-      <div>N° {$invoiceNum}</div>
-      <div>Date: {$date}</div>
-    </div>
-  </div>
-  <hr class='divider'>
-  " . ($order->paid_at ? "<div class='paid-watermark'>PAYÉ</div>" : "") . "
-  " . ($waiterName ? "<div class='serveur-badge'>Serveur : <strong>{$waiterName}</strong></div>" : "") . "
-  {$customerBlock}
-  <table>
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Article / Description</th>
-        <th style='text-align:center'>Qté</th>
-        <th style='text-align:right'>P.U. (FCFA)</th>
-        <th style='text-align:right'>Total (FCFA)</th>
-      </tr>
-    </thead>
-    <tbody>
-      {$itemsHtml}
-    </tbody>
-  </table>
-  <table class='totals-table' style='width:45%; margin-top:20px;'>
-    <tr><td>Sous-total</td><td style='text-align:right'>{$subtotal} FCFA</td></tr>
-    {$discountRow}
-    <tr class='total-row'><td>TOTAL TTC</td><td style='text-align:right'>{$total} FCFA</td></tr>
-    <tr><td><small>Dont TVA ({$vatRate}%)</small></td><td style='text-align:right'><small>{$vat} FCFA</small></td></tr>
-  </table>
-  <div style='margin-top:15px;'>
-    <h3 style='border-bottom:1px solid #eee; padding-bottom:3px; font-size:11px; margin-bottom:6px;'>DÉTAILS PAIEMENT</h3>
-    <table style='width:50%;'>
-      {$paymentsHtml}
-    </table>
-    {$givenSummaryHtml}
-  </div>
-  <div class='footer'>
-    {$thanksMsg} — {$restaurant->name} — Document certifié
-  </div>
-</body>
-</html>";
+        return $html;
     }
 
-    /**
-
-     * Génère la facture A4 en PDF via FPDF
-     */
     public function generateInvoiceA4Pdf(Order $order): string
     {
-        $order->loadMissing(['items.product', 'table', 'restaurant', 'payments', 'waiter']);
-        $pdf = new Fpdf('P', 'mm', 'A4');
-        $pdf->SetMargins(15, 10, 15);
-        $pdf->AddPage();
-        
-        $this->renderInvoiceOnPdf($pdf, $order, 10);
-        
-        return $pdf->Output('S');
+        $content = $this->invoiceA4Html($order);
+        $html = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/><style>body { font-family: 'DejaVu Sans', sans-serif; color: #000; margin: 0; padding: 20px; } .wrapper { width: 180mm; margin: 0 auto; }</style></head><body><div class='wrapper'>{$content}</div></body></html>";
+        return Pdf::loadHTML($html)->setPaper('a4')->output();
     }
 
-    /**
-     * Génération groupée A4 (2 par page) avec FPDF pour précision absolue
-     */
-    public function generateBulkInvoiceA4Pdf($orders): string
-    {
-        $pdf = new Fpdf('P', 'mm', 'A4');
-        $pdf->SetMargins(15, 10, 15);
-        $pdf->SetAutoPageBreak(false);
-
-        foreach ($orders->chunk(2) as $pair) {
-            $pdf->AddPage();
-            
-            // Premier ticket
-            $this->renderInvoiceOnPdf($pdf, $pair->values()[0], 10);
-            
-            // Ligne de découpe au milieu
-            $pdf->SetDrawColor(220, 220, 220);
-            $pdf->Line(0, 148.5, 210, 148.5);
-            
-            // Second ticket (si existant)
-            if (isset($pair->values()[1])) {
-                $this->renderInvoiceOnPdf($pdf, $pair->values()[1], 158.5);
-            }
-        }
-        
-        return $pdf->Output('S');
-    }
-
-    /**
-     * Helper pour dessiner une facture A4 sur une instance FPDF
-     * @param Fpdf $pdf
-     * @param Order $order
-     * @param float $yStart Point de départ vertical
-     */
-    private function renderInvoiceOnPdf(Fpdf $pdf, Order $order, float $yStart)
-    {
-        $restaurant = $order->restaurant;
-        $items      = $order->items->whereNotIn('status', ['cancelled']);
-        
-        $pdf->SetY($yStart);
-
-        // Paid Stamp en ARRIÈRE-PLAN (Style filigrane)
-        if ($order->paid_at) {
-            $stampCX = 105; // Centre horizontal
-            $stampCY = $yStart + 60; // Remonté (était à +75)
-            $stampAngle = -30;
-
-            $pdf->SetFont('Helvetica', 'B', 46); // Un peu plus grand sans le rectangle
-            $pdf->SetTextColor(215, 235, 215);
-            $pdf->RotatedText($stampCX - 25, $stampCY + 5, utf8_decode('PAYÉ'), $stampAngle);
-
-            // Restaurer couleurs
-            $pdf->SetTextColor(0, 0, 0);
-        }
-
-        // Header - Reduced size to fit all
-        $pdf->SetFont('Helvetica', 'B', 16);
-        $pdf->SetTextColor(26, 26, 46);
-        $pdf->Cell(100, 8, utf8_decode(strtoupper($restaurant->name)), 0, 0);
-        
-        $pdf->SetFont('Helvetica', 'B', 14);
-        $pdf->SetTextColor(50, 50, 100);
-        $pdf->Cell(80, 8, 'FACTURE', 0, 1, 'R');
-
-        $subtitle = data_get($restaurant->settings, 'receipt_subtitle');
-        if ($subtitle) {
-            $pdf->SetFont('Helvetica', 'B', 8);
-            $pdf->SetTextColor(80, 80, 80);
-            $pdf->Cell(100, 4, utf8_decode(strtoupper($subtitle)), 0, 1);
-        }
-        $pdf->SetTextColor(0, 0, 0);
-
-        // Restaurant Info
-        $pdf->SetFont('Helvetica', '', 8);
-        $addr = $restaurant->address ? utf8_decode($restaurant->address) : '';
-        $pdf->Cell(100, 4, $addr, 0, 0);
-        $pdf->SetFont('Helvetica', 'B', 9);
-        $pdf->Cell(80, 4, 'Ref : INV-' . $order->order_number, 0, 1, 'R');
-        
-        $pdf->SetFont('Helvetica', '', 8);
-        $phone = $restaurant->phone ? 'Tel : ' . $restaurant->phone : '';
-        $pdf->Cell(100, 4, $phone, 0, 0);
-        $pdf->Cell(80, 4, 'Date : ' . $order->created_at->format('d/m/Y H:i'), 0, 1, 'R');
-
-        if ($restaurant->vat_number) {
-            $pdf->Cell(60, 4, 'TVA : ' . $restaurant->vat_number, 0, 0, 'L');
-        }
-        $pdf->SetFont('Helvetica', 'B', 8);
-        $pdf->Cell(120, 4, 'IFU : 1001580865', 0, 1, 'R');
-
-        $pdf->Ln(3);
-
-        // Info Commande
-        $yBefore = $pdf->GetY();
-        $pdf->SetFont('Helvetica', 'B', 9);
-        $pdf->Cell(0, 5, utf8_decode('DÉTAILS COMMANDE'), 'B', 1, 'L');
-
-        $pdf->SetFont('Helvetica', '', 8);
-        $typeLabel = match($order->type) {
-            'dine_in'  => 'Sur place',
-            'takeaway' => 'À emporter',
-            'gozem'    => 'Gozem',
-            default    => ucfirst($order->type),
-        };
-        
-        $pdf->Cell(50, 4, 'Type: ' . utf8_decode(strtoupper($typeLabel)), 0, 0);
-        if ($order->table) {
-            $pdf->Cell(45, 4, 'Table: ' . $order->table->number, 0, 0);
-        }
-        
-        $pdf->SetFont('Helvetica', '', 8);
-        if ($order->waiter) {
-            $pdf->Cell(95, 4, 'Serveur: ' . utf8_decode($order->waiter->first_name), 0, 1);
-        } else {
-            $pdf->Ln(4);
-        }
-
-        // Table Header
-        $pdf->SetTextColor(0, 0, 0);
-        $pdf->SetFont('Helvetica', 'B', 9);
-        $pdf->Cell(10, 6, '#', 'B', 0, 'C');
-        $pdf->Cell(100, 6, 'Article / Description', 'B', 0, 'L');
-        $pdf->Cell(15, 6, 'Qt', 'B', 0, 'C');
-        $pdf->Cell(25, 6, 'P.U.', 'B', 0, 'R');
-        $pdf->Cell(30, 6, 'Total', 'B', 1, 'R');
-
-        // Table Body
-        $pdf->SetTextColor(0, 0, 0);
-        $pdf->SetFont('Helvetica', '', 8);
-        $i = 1;
-        // Limit items to ensure everything fits (around 8 items if payments are detailed)
-        foreach ($items->take(10) as $item) {
-            $subtotal = $item->quantity * $item->unit_price;
-            $pdf->Cell(10, 5, $i++, 'B', 0, 'C');
-            $pdf->Cell(100, 5, utf8_decode(substr($item->product->name, 0, 50)), 'B', 0, 'L');
-            $pdf->Cell(15, 5, $item->quantity, 'B', 0, 'C');
-            $pdf->Cell(25, 5, number_format($item->unit_price, 0, '.', ' '), 'B', 0, 'R');
-            $pdf->Cell(30, 5, number_format($subtotal, 0, '.', ' '), 'B', 1, 'R');
-        }
-        if ($items->count() > 10) {
-            $pdf->Cell(180, 5, '... (Voir suite sur ticket original)', 0, 1, 'C');
-        }
-
-        // Totals & Payments
-        $pdf->Ln(2);
-        
-        // Block 1: Totals (Now on the left, above payments)
-        $pdf->SetFont('Helvetica', '', 9);
-        $pdf->Cell(45, 5, 'Sous-total', 0, 0, 'L');
-        $pdf->Cell(35, 5, number_format((float) $order->subtotal, 0, '.', ' ') . ' FCFA', 0, 1, 'R');
-        
-        if (($order->discount_amount ?? 0) > 0) {
-            $pdf->Cell(45, 5, 'Remise', 0, 0, 'L');
-            $pdf->Cell(35, 5, '-' . number_format((float) $order->discount_amount, 0, '.', ' ') . ' FCFA', 0, 1, 'R');
-        }
-
-        $pdf->SetFont('Helvetica', 'B', 10);
-        $pdf->Cell(45, 7, utf8_decode('TOTAL TTC'), 'T,B', 0, 'L');
-        $pdf->Cell(35, 7, number_format((float) $order->total, 0, '.', ' ') . ' FCFA', 'T,B', 1, 'R');
-
-        $pdf->SetFont('Helvetica', '', 8);
-        $pdf->Cell(45, 5, 'Dont TVA (' . ($restaurant->settings['default_vat_rate'] ?? 18) . '%)', 0, 0, 'L');
-        $pdf->Cell(35, 5, number_format((float) $order->vat_amount, 0, '.', ' ') . ' FCFA', 0, 1, 'R');
-        
-        $pdf->Ln(4);
-
-        // Block 2: Payment Details (Below totals)
-        $pdf->SetFont('Helvetica', 'B', 8);
-        $pdf->SetTextColor(100);
-        $pdf->Cell(95, 4, utf8_decode('DÉTAILS PAIEMENT'), 'B', 1, 'L');
-        $pdf->SetTextColor(0);
-        $pdf->SetFont('Helvetica', '', 8);
-        foreach ($order->payments as $pmt) {
-            $pdf->Cell(50, 5, utf8_decode(strtoupper($pmt->method)), 0, 0, 'L');
-            $pdf->Cell(40, 5, number_format($pmt->amount, 0, '.', ' ') . ' FCFA', 0, 1, 'R');
-        }
-        
-        $pdf->Ln(2);
-
-        // Big Summary Box
-        $totalGiven = $order->payments->sum('amount_given');
-        $totalChange = $order->payments->sum('change_given');
-        if ($totalGiven > 0) {
-            $pdf->SetFont('Helvetica', 'B', 9);
-            $pdf->Cell(60, 6, utf8_decode(' DONNÉ PAR LE CLIENT'), 'B', 0, 'L');
-            $pdf->Cell(35, 6, number_format($totalGiven, 0, '.', ' ') . ' FCFA', 'B', 1, 'R');
-            $pdf->Cell(60, 6, ' MONNAIE RENDUE', 'B', 0, 'L');
-            $pdf->Cell(35, 6, number_format($totalChange, 0, '.', ' ') . ' FCFA', 'B', 1, 'R');
-        }
-
-        // Footer
-        $thanksMsg = data_get($restaurant->settings, 'thank_you_message') ?? 'Merci pour votre confiance';
-        $pdf->SetY($yStart + 138); // Force footer near the middle/end of receipt block
-        $pdf->SetFont('Helvetica', 'I', 7);
-        $pdf->SetDrawColor(220);
-        $pdf->Line(15, $pdf->GetY(), 195, $pdf->GetY());
-        $pdf->Cell(0, 4, utf8_decode($thanksMsg) . ' - Powered by Omega POS', 0, 1, 'C');
-
-    }
-    /**
-     * Ticket Cuisine/Bar/Pizza en format PDF 58/80mm SANS PRIX
-     */
-    public function generateKitchenTicketPdf(Order $order, string $destination = 'kitchen'): string
-    {
-        $order->loadMissing([
-            'items.product.category',
-            'table',
-            'waiter',
-        ]);
-
-        $filteredItems = $order->items->whereNotIn('status', ['cancelled']);
-        $allGroups = $this->routing->groupByDestination($filteredItems);
-        $items = $allGroups[$destination] ?? collect();
-
-        if ($items->isEmpty()) return '';
-
-        $pdf = new Fpdf('P', 'mm', array(80, 100 + ($items->count() * 15)));
-        $pdf->SetMargins(5, 5, 5);
-        $pdf->AddPage();
-        
-        // Entête Restaurant
-        $pdf->SetFont('Helvetica', 'B', 10);
-        $pdf->Cell(0, 5, utf8_decode(strtoupper($order->restaurant->name)), 0, 1, 'C');
-        $subtitle = data_get($order->restaurant->settings, 'receipt_subtitle');
-        if ($subtitle) {
-            $pdf->SetFont('Helvetica', 'BI', 7);
-            $pdf->Cell(0, 4, utf8_decode($subtitle), 0, 1, 'C');
-        }
-        
-        $pdf->SetFont('Helvetica', 'B', 9);
-        $pdf->Cell(0, 5, 'IFU : 1001580865', 0, 1, 'C');
-        $pdf->Ln(2);
-
-        // Entête Destination
-        $pdf->SetFont('Helvetica', 'B', 16);
-        $pdf->Cell(0, 8, utf8_decode($this->routing->destinationLabel($destination)), 0, 1, 'C');
-        $pdf->SetFont('Helvetica', 'B', 12);
-        $pdf->Cell(0, 6, "Ticket #" . $order->order_number, 0, 1, 'C');
-        
-        $pdf->SetFont('Helvetica', '', 9);
-        $pdf->Cell(0, 5, "Modifie le: " . now()->format('d/m/Y H:i'), 0, 1, 'C');
-        
-        $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-        
-        // Table or Type
-        $pdf->SetFont('Helvetica', 'B', 14);
-        if ($order->table instanceof \App\Models\Table) {
-            $pdf->Cell(0, 8, "TABLE " . $order->table->number, 1, 1, 'C');
-        } else {
-            $typeLabel = match($order->type) { 'dine_in' => 'Sur place', 'takeaway' => 'A emporter', 'gozem' => 'Livraison', default => ucfirst($order->type) };
-            $pdf->Cell(0, 8, strtoupper(utf8_decode($typeLabel)), 1, 1, 'C');
-        }
-        
-        $pdf->Ln(4);
-        
-        // Infos complémentaires
-        if ($order->waiter) {
-            $pdf->SetFont('Helvetica', '', 10);
-            $pdf->Cell(0, 5, "Serveur: " . utf8_decode($order->waiter->first_name), 0, 1, 'L');
-        }
-        if ($order->customer_name && $order->type === 'gozem') {
-            $pdf->SetFont('Helvetica', '', 10);
-            $pdf->Cell(0, 5, "Client: " . utf8_decode($order->customer_name), 0, 1, 'L');
-            $pdf->Cell(0, 5, "Tel: " . $order->customer_phone, 0, 1, 'L');
-        }
-        
-        if ($order->notes) {
-            $pdf->SetFont('Helvetica', 'B', 10);
-            $pdf->MultiCell(0, 6, utf8_decode("Note Cmd: " . $order->notes), 1, 'L');
-        }
-        
-        $pdf->Ln(2);
-        $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-        $pdf->Ln(2);
-
-        // Liste des articles
-        $pdf->SetFont('Helvetica', 'B', 14);
-        foreach ($items as $item) {
-            $x = $pdf->GetX();
-            $y = $pdf->GetY();
-            
-            $pdf->Cell(12, 6, "x" . $item->quantity, 0, 0, 'L');
-            
-            // On gère un passage à la ligne possible avec MultiCell (donc on sauve le X/Y)
-            $pdf->MultiCell(58, 6, utf8_decode(strtoupper($item->product->name)), 0, 'L');
-            
-            if ($item->notes) {
-                // S'il y a une note d'article
-                $pdf->SetFont('Helvetica', 'I', 11);
-                $pdf->SetX($x + 12);
-                $pdf->MultiCell(58, 5, utf8_decode("! " . $item->notes), 0, 'L');
-                $pdf->SetFont('Helvetica', 'B', 14);
-            }
-            $pdf->Ln(3);
-        }
-        
-        $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-        $pdf->Ln(3);
-        $pdf->SetFont('Helvetica', 'B', 10);
-        $pdf->Cell(0, 4, "*** FIN DU BON ***", 0, 1, 'C');
-
-        return $pdf->Output('S');
-    }
-
-    /**
-     * Génère le reçu client en PDF (format ticket thermique 58mm-ish)
-     */
     public function generateReceiptPdf(Order $order): string
     {
-        $order->loadMissing(['items.product', 'table', 'restaurant', 'payments', 'waiter']);
         $restaurant = $order->restaurant;
-        $items      = $order->items->whereNotIn('status', ['cancelled']);
-
-        $pdf = new Fpdf('P', 'mm', array(80, 200 + ($items->count() * 15)));
-        $pdf->SetMargins(5, 5, 5);
-        $pdf->AddPage();
-        $pdf->SetFont('Arial', 'B', 12);
+        $config = $restaurant->settings ?? [];
+        $receipt = $this->buildReceiptData($order, $restaurant, $config);
         
-        if ($restaurant->logo && file_exists(storage_path('app/public/' . $restaurant->logo))) {
-            try {
-                $pdf->Image(storage_path('app/public/' . $restaurant->logo), 30, 5, 20);
-                $pdf->Ln(22);
-            } catch (\Exception $e) {}
-        } else {
-            $pdf->Cell(0, 10, utf8_decode(strtoupper($restaurant->name)), 0, 1, 'C');
-        }
-
-        $subtitle = data_get($restaurant->settings, 'receipt_subtitle');
-        if ($subtitle) {
-            $pdf->SetFont('Arial', 'B', 10);
-            $pdf->Cell(0, 5, utf8_decode(strtoupper($subtitle)), 0, 1, 'C');
-        }
-        
-        $pdf->SetFont('Arial', 'B', 9);
-        $pdf->Cell(0, 5, $order->created_at->format('d/m/Y H:i'), 0, 1, 'C');
-
-        $pdf->SetFont('Arial', '', 9);
-        if ($restaurant->address) $pdf->Cell(0, 5, utf8_decode($restaurant->address), 0, 1, 'C');
-        if ($restaurant->phone)   $pdf->Cell(0, 5, 'Te : ' . $restaurant->phone, 0, 1, 'C');
-        if ($restaurant->vat_number) $pdf->Cell(0, 5, 'TVA : ' . $restaurant->vat_number, 0, 1, 'C');
-        
-        $pdf->SetFont('Arial', 'B', 9);
-        $pdf->Cell(0, 5, 'IFU : 1001580865', 0, 1, 'C');
-        $pdf->Cell(0, 5, '------------------------------------------', 0, 1, 'C');
-        
-        $pdf->SetFont('Arial', 'B', 10);
-        $pdf->Cell(40, 5, 'TICKET DE CAISSE', 0, 0);
-        $pdf->Cell(30, 5, $order->order_number, 0, 1, 'R');
-        
-        $pdf->SetFont('Arial', '', 8);
-        $pdf->Cell(40, 4, 'Date', 0, 0);
-        $pdf->Cell(30, 4, $order->created_at->format('d/m/Y H:i'), 0, 1, 'R');
-        
-        if ($order->table) {
-            $pdf->Cell(40, 4, 'Table', 0, 0);
-            $tableNum = ($order->table instanceof \App\Models\Table) ? $order->table->number : 'N/A';
-            $pdf->Cell(30, 4, $tableNum, 0, 1, 'R');
-        }
-        
-        $pdf->Cell(40, 4, 'Type', 0, 0);
-        $typeLabel = match($order->type) {
-            'dine_in'  => 'SUR PLACE',
-            'takeaway' => 'A EMPORTER',
-            'gozem'    => 'LIVRAISON (GOZEM)',
-            'delivery' => 'LIVRAISON',
-            default    => strtoupper($order->type)
-        };
-        $pdf->Cell(30, 4, utf8_decode($typeLabel), 0, 1, 'R');
-
-        if ($order->waiter) {
-            $pdf->Cell(40, 4, 'Serveur', 0, 0);
-            $pdf->Cell(30, 4, utf8_decode($order->waiter->first_name . ' ' . $order->waiter->last_name), 0, 1, 'R');
-        }
-
-        $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-
-        // LIGNES ARTICLES
-        // Usable width is 80 - 5 - 5 = 70.
-        // Let's divide: Article(35) Qt(10) PU(10) Total(15) = 70
-        $pdf->SetFont('Arial', 'B', 8);
-        $pdf->Cell(35, 5, 'Article', 0, 0);
-        $pdf->Cell(10, 5, 'Qt', 0, 0, 'C');
-        $pdf->Cell(10, 5, 'PU', 0, 0, 'R');
-        $pdf->Cell(15, 5, 'Total', 0, 1, 'R');
-        $pdf->SetFont('Arial', '', 8);
-
-        foreach ($items as $item) {
-            $lineTotal = $item->quantity * $item->unit_price;
-            $pdf->Cell(35, 4, utf8_decode(substr($item->product->name, 0, 20)), 0, 0);
-            $pdf->Cell(10, 4, $item->quantity, 0, 0, 'C');
-            $pdf->Cell(10, 4, number_format($item->unit_price, 0, '', ''), 0, 0, 'R');
-            $pdf->Cell(15, 4, number_format($lineTotal, 0, '', ''), 0, 1, 'R');
-
-            if ($item->notes) {
-                $pdf->SetFont('Arial', 'I', 7);
-                $pdf->Cell(5, 3);
-                $pdf->Cell(45, 3, 'Note: ' . utf8_decode($item->notes), 0, 1);
-                $pdf->SetFont('Arial', '', 8);
-            }
-        }
-
-        $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-
-        // TOTAUX
-        $pdf->Cell(45, 4, 'Sous-total', 0, 0);
-        $pdf->Cell(25, 4, number_format((float) $order->subtotal, 0, '.', ' '), 0, 1, 'R');
-        
-        if ($order->discount_amount > 0) {
-            $pdf->Cell(45, 4, 'Remise', 0, 0);
-            $pdf->Cell(25, 4, '-' . number_format((float) $order->discount_amount, 0, '.', ' '), 0, 1, 'R');
-        }
-
-        $pdf->SetFont('Arial', 'B', 10);
-        $pdf->Cell(45, 6, 'TOTAL TTC', 0, 0);
-        $pdf->Cell(25, 6, number_format((float) $order->total, 0, '.', ' '), 0, 1, 'R');
-        $pdf->SetFont('Arial', '', 7);
-        $pdf->Cell(45, 4, 'Dont TVA (' . ($restaurant->settings['default_vat_rate'] ?? 18) . '%)');
-        $pdf->Cell(25, 4, number_format((float) $order->vat_amount, 0, '.', ' '), 0, 1, 'R');
-        $pdf->SetFont('Arial', '', 8);
-
-        $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-
-        // PAIEMENTS - simplified to summary only
-
-        $totalGiven = $order->payments->sum('amount_given');
-        $totalChange = $order->payments->sum('change_given');
-        if ($totalGiven > 0) {
-            $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-            $pdf->SetFont('Arial', 'B', 9);
-            $pdf->Cell(40, 4, utf8_decode('DONNE PAR CLIENT'), 0, 0);
-            $pdf->Cell(30, 4, number_format($totalGiven, 0, '.', ' '), 0, 1, 'R');
-            $pdf->Cell(40, 4, utf8_decode('MONNAIE RENDUE'), 0, 0);
-            $pdf->Cell(30, 4, number_format($totalChange, 0, '.', ' '), 0, 1, 'R');
-            $pdf->SetFont('Arial', '', 8);
-        }
-
-        $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-
-        if ($order->paid_at) {
-            $pdf->SetFont('Arial', 'B', 14);
-            $pdf->Cell(0, 8, utf8_decode('*** PAYÉ ***'), 0, 1, 'C');
-            $pdf->SetFont('Arial', '', 8);
-            $pdf->Cell(0, 4, '------------------------------------------', 0, 1, 'C');
-        }
-
-        // PIED DE PAGE
-        $pdf->SetFont('Arial', 'B', 9);
-        $pdf->MultiCell(0, 4, utf8_decode($restaurant->settings['thank_you_message'] ?? 'Merci pour votre confiance'), 0, 'C');
-        
-        $pdf->SetFont('Arial', '', 7);
-        $pdf->Cell(0, 4, utf8_decode('Généré le ' . now()->format('d/m/Y à H:i')), 0, 1, 'C');
-        $pdf->Cell(0, 4, utf8_decode('Certifié par smartflow POS'), 0, 1, 'C');
-
-        // QR Code - Site Web
-        try {
-            $qrPath = public_path('img/website_qr.png');
-            if (file_exists($qrPath)) {
-                $pdf->Ln(1);
-                $pdf->SetFont('Arial', 'B', 7);
-                $pdf->Cell(0, 4, 'Hello, Scan moi', 0, 1, 'C');
-                $pdf->Image($qrPath, 28, $pdf->GetY(), 24);
-                $pdf->Ln(28);
-            }
-        } catch (\Exception $e) {}
-
-        return $pdf->Output('S');
+        $html = view('receipts.ticket', compact('receipt', 'restaurant', 'config'))->render();
+        return Pdf::loadHTML($html)->setPaper([0, 0, 226.77, 800])->output();
     }
 
     /**
-     * Génère la facture A4 PDF pour une Ardoise (Customer Tab)
+     * Génère le HTML A4 professionnel pour une commande de gâteau
      */
-    public function generateTabInvoicePdf(\App\Models\CustomerTab $tab): string
+    public function cakeOrderA4Html(\App\Models\CakeOrder $cakeOrder): string
     {
-        $tab->load(['orders.items.product', 'orders.table', 'restaurant', 'creator']);
-        $restaurant = $tab->restaurant;
-        
-        $pdf = new Fpdf('P', 'mm', 'A4');
-        $pdf->AddPage();
-        
-        // Logo si existe
-        if ($restaurant->logo && file_exists(storage_path('app/public/' . $restaurant->logo))) {
-            try {
-                $pdf->Image(storage_path('app/public/' . $restaurant->logo), 10, 10, 30);
-                $pdf->Ln(25);
-            } catch (\Exception $e) {}
+        $restaurant = $cakeOrder->restaurant;
+        $total = number_format((float)$cakeOrder->total, 0, ',', ' ');
+        $advance = number_format((float)$cakeOrder->advance_paid, 0, ',', ' ');
+        $remaining = number_format((float)$cakeOrder->remaining_amount, 0, ',', ' ');
+        $date = \Carbon\Carbon::parse($cakeOrder->delivery_date)->locale('fr')->isoFormat('LL');
+        $time = $cakeOrder->delivery_time ? substr($cakeOrder->delivery_time, 0, 5) : 'N/A';
+
+        $qrPath = public_path('img/website_qr.png');
+        $qrBase64 = null;
+        if (file_exists($qrPath)) {
+            $qrData = base64_encode(file_get_contents($qrPath));
+            $qrBase64 = 'data:image/png;base64,' . $qrData;
         }
 
-        // Header
-        $pdf->SetFont('Arial', 'B', 18);
-        $pdf->Cell(120, 10, utf8_decode(strtoupper($restaurant->name)), 0, 0);
-        $pdf->SetFont('Arial', 'B', 12);
-        $pdf->Cell(0, 10, utf8_decode('FACTURE ARDOISE'), 0, 1, 'R');
+        return "
+        <div style='font-family: \"DejaVu Sans\", sans-serif; color: #000; padding: 15px; border: 1px solid #000; position: relative;'>
+            <table style='width: 100%; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 10px;'>
+                <tr>
+                    <td style='vertical-align: top;'>
+                        <div style='font-size: 18px; font-weight: bold; text-transform: uppercase;'>{$restaurant->name}</div>
+                        <div style='font-size: 9px; font-weight: bold; margin-top: 2px;'>
+                            {$restaurant->address}<br>
+                            Tél: {$restaurant->phone}
+                        </div>
+                    </td>
+                    <td style='text-align: right; vertical-align: top;'>
+                        <div style='border: 2px solid #000; padding: 5px 10px; font-weight: bold; font-size: 11px; display: inline-block;'>BON DE COMMANDE</div>
+                    </td>
+                </tr>
+            </table>
 
-        $subtitle = data_get($restaurant->settings, 'receipt_subtitle');
-        if ($subtitle) {
-            $pdf->SetFont('Arial', 'B', 10);
-            $pdf->SetTextColor(80, 80, 80);
-            $pdf->Cell(120, 6, utf8_decode(strtoupper($subtitle)), 0, 1);
-        }
-        $pdf->SetTextColor(0);
-        
-        $pdf->SetFont('Arial', '', 9);
-        $pdf->SetTextColor(100, 100, 100);
-        $pdf->Cell(120, 5, utf8_decode($restaurant->address ?? 'ADRESSE NON DEFINIE'), 0, 0);
-        $pdf->Cell(0, 5, 'Date: ' . now()->format('d/m/Y'), 0, 1, 'R');
-        
-        $pdf->Cell(120, 5, utf8_decode('Tél: ' . $restaurant->phone), 0, 0);
-        $pdf->Cell(0, 5, utf8_decode('Réf: ARD-' . $tab->id), 0, 1, 'R');
-        $pdf->SetFont('Arial', 'B', 9);
-        $pdf->Cell(0, 5, 'IFU : 1001580865', 0, 1, 'R');
-        
-        $pdf->Ln(5);
-        
-        // Bloc Client
-        $pdf->SetFont('Arial', 'B', 10);
-        $pdf->SetTextColor(0);
-        $pdf->Cell(0, 8, utf8_decode('INFORMATIONS CLIENT'), 'B', 1, 'L');
-        $pdf->SetFont('Arial', '', 10);
-        $pdf->Cell(95, 7, utf8_decode('Nom: ' . $tab->full_name), 0, 0);
-        $pdf->Cell(0, 7, utf8_decode('Téléphone: ' . $tab->phone), 0, 1);
-        $pdf->Cell(0, 7, utf8_decode('Ouverte le: ' . $tab->opened_at->format('d/m/Y à H:i')), 0, 1);
-        
-        $pdf->Ln(5);
-        
-        // Tableau des articles
-        $pdf->SetFont('Arial', 'B', 10);
-        $pdf->SetTextColor(0);
-        
-        $pdf->Cell(10, 10, '#', 'B', 0, 'C');
-        $pdf->Cell(85, 10, utf8_decode('Désignation'), 'B', 0, 'L');
-        $pdf->Cell(15, 10, utf8_decode('Qté'), 'B', 0, 'C');
-        $pdf->Cell(35, 10, 'P.U. (FCFA)', 'B', 0, 'R');
-        $pdf->Cell(35, 10, 'Total (FCFA)', 'B', 1, 'R');
-        
-        $pdf->SetFont('Arial', '', 9);
-        $pdf->SetTextColor(0);
-        
-        $i = 1;
-        $totalVat = 0;
-        foreach ($tab->orders as $order) {
-            $totalVat += (float) $order->vat_amount;
-            foreach ($order->items->whereNotIn('status', ['cancelled']) as $item) {
-                $pdf->Cell(10, 8, $i, 'B', 0, 'C');
-                $pdf->Cell(85, 8, utf8_decode($item->product->name), 'B', 0, 'L');
-                $pdf->Cell(15, 8, $item->quantity, 'B', 0, 'C');
-                $pdf->Cell(35, 8, number_format($item->unit_price, 0, '.', ' '), 'B', 0, 'R');
-                $pdf->Cell(35, 8, number_format($item->quantity * $item->unit_price, 0, '.', ' '), 'B', 1, 'R');
-                $i++;
-                
-                if ($pdf->GetY() > 270) {
-                    $pdf->AddPage();
-                    $pdf->SetFont('Arial', 'B', 10);
-                    $pdf->Cell(10, 10, '#', 'B', 0, 'C');
-                    $pdf->Cell(85, 10, 'Suite...', 'B', 0, 'L');
-                    $pdf->Ln();
-                    $pdf->SetFont('Arial', '', 9);
-                }
-            }
-        }
-        
-        // Assurer qu'il y a assez d'espace pour les totaux et le footer
-        if ($pdf->GetY() > 210) {
-            $pdf->AddPage();
-        }
+            <div style='font-size: 14px; font-weight: bold; margin-bottom: 2px;'>CONFIRMATION DE COMMANDE GÂTEAU</div>
+            <div style='font-size: 10px; font-weight: bold; margin-bottom: 15px;'>Réf: #{$cakeOrder->order_number} | Emis le " . date('d/m/Y à H:i') . "</div>
 
-        $pdf->Ln(5);
-        
-        // Totaux
-        $pdf->SetX(120);
-        $pdf->SetFont('Arial', 'B', 10);
-        $total = $tab->total_amount;
-        $paid = $tab->paid_amount;
-        $remaining = $tab->remainingAmount();
-        $vatRate = $restaurant->settings['default_vat_rate'] ?? 18;
-        $pdf->SetX(120);
-        $pdf->SetTextColor(0);
-        $pdf->Cell(45, 10, 'TOTAL TTC', 'T,B', 0, 'L');
-        $pdf->Cell(35, 10, number_format((float) $total, 0, '.', ' ') . ' FCFA', 'T,B', 1, 'R');
-        $pdf->SetFont('Arial', '', 9);
-        $pdf->SetX(120);
-        $pdf->Cell(45, 8, utf8_decode('Dont TVA (' . $vatRate . '%)'), 0, 0);
-        $pdf->Cell(35, 8, number_format((float) $totalVat, 0, '.', ' '), 0, 1, 'R');
-        
-        $pdf->SetX(120);
-        $pdf->SetFont('Arial', 'B', 12);
-        $pdf->SetTextColor(255, 0, 0);
-        $pdf->Cell(45, 10, 'RESTE A PAYER', 0, 0);
-        $pdf->Cell(35, 10, number_format($remaining, 0, '.', ' ') . ' FCFA', 0, 1, 'R');
-        
-        $pdf->Ln(5);
-        $pdf->SetTextColor(0);
-        
-        // Bloc Historique Paiements
-        $pdf->SetFont('Arial', 'B', 10);
-        $pdf->Cell(0, 8, utf8_decode('HISTORIQUE DES VERSEMENTS'), 'B', 1, 'L');
-        $pdf->SetFont('Arial', '', 9);
-        
-        $tab->load('orders.payments');
-        $allPayments = $tab->orders->flatMap->payments->sortByDesc('created_at');
-        
-        if ($allPayments->isEmpty()) {
-            $pdf->Cell(0, 7, utf8_decode('Aucun versement enregistré.'), 0, 1, 'C');
-        } else {
-            foreach ($allPayments as $p) {
-                $dateP = $p->created_at->format('d/m/Y H:i');
-                $methodLabel = match($p->method) { 
-                    'cash' => 'ESPECES', 
-                    'momo' => 'MOBILE MONEY',
-                    'orange_money' => 'ORANGE MONEY',
-                    'wave' => 'WAVE',
-                    default => strtoupper($p->method) 
-                };
-                $pdf->Cell(60, 6, $dateP . ' - ' . $methodLabel, 0, 0);
-                $pdf->Cell(0, 6, number_format($p->amount, 0, '.', ' ') . ' FCFA', 0, 1, 'R');
-            }
-        }
-        
-        // Footer aligné dynamiquement après les totaux
-        $pdf->Ln(10);
-        $pdf->SetDrawColor(200, 200, 200);
-        $pdf->Line(15, $pdf->GetY(), 195, $pdf->GetY());
-        $pdf->Ln(3);
-        $pdf->SetFont('Arial', 'I', 8);
-        $pdf->SetTextColor(150);
-        $pdf->Cell(0, 5, utf8_decode('Certifié par Omega POS — Document original'), 0, 1, 'C');
-        $pdf->Cell(0, 5, utf8_decode('Merci pour votre confiance chez ' . $restaurant->name), 0, 1, 'C');
-        
-        return $pdf->Output('S');
+            <table style='width: 100%; border-collapse: collapse; margin-bottom: 15px;'>
+                <tr>
+                    <td style='width: 48%; border: 1px solid #000; padding: 8px; vertical-align: top;'>
+                        <div style='font-size: 8px; font-weight: bold; text-transform: uppercase; margin-bottom: 4px;'>Client</div>
+                        <div style='font-size: 11px; font-weight: bold;'>{$cakeOrder->customer_name}</div>
+                        <div style='font-size: 10px; font-weight: bold;'>Tél: {$cakeOrder->customer_phone}</div>
+                    </td>
+                    <td style='width: 4%;'></td>
+                    <td style='width: 48%; border: 1px solid #000; padding: 8px; vertical-align: top;'>
+                        <div style='font-size: 8px; font-weight: bold; text-transform: uppercase; margin-bottom: 4px;'>Livraison Prévue</div>
+                        <div style='font-size: 11px; font-weight: bold;'>{$date}</div>
+                        <div style='font-size: 10px; font-weight: bold;'>à {$time}</div>
+                    </td>
+                </tr>
+            </table>
+
+            <table style='width: 100%; border-collapse: collapse; margin-bottom: 10px;'>
+                <thead>
+                    <tr>
+                        <th style='background: #000; color: #fff; padding: 6px; text-align: left; font-size: 9px; text-transform: uppercase;'>Description</th>
+                        <th style='background: #000; color: #fff; padding: 6px; text-align: center; font-size: 9px; text-transform: uppercase; width: 60px;'>Qté</th>
+                        <th style='background: #000; color: #fff; padding: 6px; text-align: right; font-size: 9px; text-transform: uppercase; width: 100px;'>Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style='padding: 8px 6px; border-bottom: 1px solid #000; font-size: 11px; font-weight: bold;'>Gâteau Personnalisé</td>
+                        <td style='padding: 8px 6px; border-bottom: 1px solid #000; font-size: 11px; text-align: center;'>1</td>
+                        <td style='padding: 8px 6px; border-bottom: 1px solid #000; font-size: 11px; text-align: right; font-weight: bold;'>{$total} FCFA</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div style='border: 1px solid #000; padding: 8px; margin-bottom: 15px;'>
+                <div style='font-size: 8px; font-weight: bold; text-transform: uppercase; margin-bottom: 2px;'>Détails & Personnalisation</div>
+                <div style='font-size: 10px; font-weight: bold;'>" . nl2br($cakeOrder->notes ?: 'Gâteau personnalisé.') . "</div>
+            </div>
+
+            <table style='width: 250px; margin-left: auto; border-collapse: collapse;'>
+                <tr>
+                    <td style='padding: 4px 0; font-size: 10px; font-weight: bold; text-align: right; padding-right: 15px;'>Sous-total</td>
+                    <td style='padding: 4px 0; font-size: 10px; font-weight: bold; text-align: right;'>{$total} FCFA</td>
+                </tr>
+                <tr>
+                    <td style='padding: 4px 0; font-size: 10px; font-weight: bold; text-align: right; padding-right: 15px;'>Acompte</td>
+                    <td style='padding: 4px 0; font-size: 10px; font-weight: bold; text-align: right;'>- {$advance} FCFA</td>
+                </tr>
+                <tr style='background: #000; color: #fff;'>
+                    <td style='padding: 8px 15px; font-size: 12px; font-weight: bold; text-align: right;'>RESTE À PAYER</td>
+                    <td style='padding: 8px 10px; font-size: 12px; font-weight: bold; text-align: right;'>{$remaining} FCFA</td>
+                </tr>
+            </table>
+
+            <div style='margin-top: 20px; width: 100%;'>
+                <table style='width: 100%;'>
+                    <tr>
+                        <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 8px; font-weight: bold;'>Signature Client</td>
+                        <td style='width: 20%; text-align: center;'>
+                            " . ($qrBase64 ? "<img src='{$qrBase64}' style='width: 50px; height: 50px; filter: grayscale(100%);'>" : "") . "
+                        </td>
+                        <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 8px; font-weight: bold;'>Cachet Établissement</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div style='margin-top: 10px; text-align: center; font-size: 7px; font-weight: bold; border-top: 1px solid #000; padding-top: 5px;'>
+                Document certifié par Omega POS • " . now()->format('d/m/y H:i') . "
+            </div>
+        </div>";
     }
 
+    /**
+     * Génère un PDF A4 avec 2 copies pour une commande de gâteau
+     */
+    public function generateCakeOrderA4Pdf(\App\Models\CakeOrder $cakeOrder): string
+    {
+        $content = $this->cakeOrderA4Html($cakeOrder);
+        $html = "<html><head><style>
+            @page { margin: 10mm; }
+            body { margin: 0; padding: 0; background: #fff; }
+            .copy-wrapper { width: 100%; }
+        </style></head><body>
+            <div class='copy-wrapper'>{$content}</div>
+        </body></html>";
+        
+        return Pdf::loadHTML($html)->setPaper('a4')->output();
+    }
 
+    /**
+     * Génère le HTML A4 professionnel pour un reçu de dépense
+     */
+    public function expenseA4Html(Expense $expense): string
+    {
+        $restaurant = $expense->restaurant;
+        $id = str_pad($expense->id, 6, '0', STR_PAD_LEFT);
+        $date = \Carbon\Carbon::parse($expense->created_at)->format('d/m/Y à H:i');
+        $amount = number_format((float)$expense->amount, 0, ',', ' ');
+
+        return "
+        <div style='font-family: \"DejaVu Sans\", sans-serif; color: #000; padding: 15px; border: 1px solid #000; position: relative;'>
+            <table style='width: 100%; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 10px;'>
+                <tr>
+                    <td style='vertical-align: top;'>
+                        <div style='font-size: 18px; font-weight: bold; text-transform: uppercase;'>{$restaurant->name}</div>
+                        <div style='font-size: 9px; font-weight: bold; margin-top: 2px;'>
+                            {$restaurant->address}<br>
+                            Tél: {$restaurant->phone}
+                        </div>
+                    </td>
+                    <td style='text-align: right; vertical-align: top;'>
+                        <div style='border: 2px solid #000; padding: 5px 10px; font-weight: bold; font-size: 11px; display: inline-block;'>PIÈCE COMPTABLE</div>
+                    </td>
+                </tr>
+            </table>
+
+            <div style='font-size: 14px; font-weight: bold; margin-bottom: 2px;'>JUSTIFICATIF DE SORTIE DE CAISSE</div>
+            <div style='font-size: 10px; font-weight: bold; margin-bottom: 15px;'>Réf: EXP-{$id} | Émis le {$date}</div>
+
+            <table style='width: 100%; border-collapse: collapse; margin-bottom: 15px;'>
+                <tr>
+                    <td style='width: 48%; border: 1px solid #000; padding: 8px; vertical-align: top;'>
+                        <div style='font-size: 8px; font-weight: bold; text-transform: uppercase; margin-bottom: 4px;'>Bénéficiaire</div>
+                        <div style='font-size: 11px; font-weight: bold;'>" . ($expense->beneficiary ?: 'Non spécifié') . "</div>
+                    </td>
+                    <td style='width: 4%;'></td>
+                    <td style='width: 48%; border: 1px solid #000; padding: 8px; vertical-align: top;'>
+                        <div style='font-size: 8px; font-weight: bold; text-transform: uppercase; margin-bottom: 4px;'>Agent / Coursier</div>
+                        <div style='font-size: 11px; font-weight: bold;'>" . ($expense->agent_name ?: 'Non spécifié') . "</div>
+                    </td>
+                </tr>
+            </table>
+
+            <div style='border: 1px solid #000; padding: 10px; margin-bottom: 15px;'>
+                <div style='font-size: 8px; font-weight: bold; text-transform: uppercase; margin-bottom: 4px;'>Motif de la dépense</div>
+                <div style='font-size: 12px; font-weight: bold;'>" . strtoupper($expense->description) . "</div>
+                <div style='font-size: 9px; color: #333; margin-top: 4px;'>Catégorie: " . strtoupper($expense->category) . "</div>
+            </div>
+
+            <div style='background: #000; color: #fff; padding: 15px; text-align: center; margin-bottom: 20px;'>
+                <div style='font-size: 10px; text-transform: uppercase; margin-bottom: 5px;'>Montant Total Décaissé</div>
+                <div style='font-size: 24px; font-weight: bold;'>{$amount} FCFA</div>
+            </div>
+
+            <table style='width: 100%; margin-top: 20px;'>
+                <tr>
+                    <td style='width: 45%; border-top: 1px dashed #000; padding-top: 8px; text-align: center;'>
+                        <div style='font-size: 9px; font-weight: bold; text-transform: uppercase;'>Signature de l'Agent</div>
+                        <br><br>
+                    </td>
+                    <td style='width: 10%;'></td>
+                    <td style='width: 45%; border-top: 1px dashed #000; padding-top: 8px; text-align: center;'>
+                        <div style='font-size: 9px; font-weight: bold; text-transform: uppercase;'>Validation Direction</div>
+                        <br><br>
+                    </td>
+                </tr>
+            </table>
+
+            <div style='margin-top: 15px; text-align: center; font-size: 7px; font-weight: bold; border-top: 1px solid #000; padding-top: 5px;'>
+                Établi par: " . ($expense->user->first_name ?? 'Inconnu') . " • " . now()->format('d/m/y H:i') . "
+            </div>
+        </div>";
+    }
+
+    /**
+     * Génère un PDF A4 avec 2 copies pour un reçu de dépense
+     */
+    public function generateExpenseA4Pdf(Expense $expense): string
+    {
+        $content = $this->expenseA4Html($expense);
+        $html = "<html><head><style>
+            @page { margin: 10mm; }
+            body { margin: 0; padding: 0; background: #fff; }
+            .copy-wrapper { width: 100%; }
+        </style></head><body>
+            <div class='copy-wrapper'>{$content}</div>
+        </body></html>";
+        
+        return Pdf::loadHTML($html)->setPaper('a4')->output();
+    }
+    public function generateBulkInvoiceA4Pdf($orders): string
+    {
+        $html = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/><style>
+            body { margin: 0; padding: 10mm; font-family: 'DejaVu Sans', sans-serif; background: #fff; }
+            .invoice-outer { width: 100%; margin-bottom: 20px; }
+            .invoice-inner { width: 180mm; margin: 0 auto; }
+            .divider { border-bottom: 1px dashed #000; margin: 15px 0; width: 180mm; margin-left: auto; margin-right: auto; }
+        </style></head><body>";
+        
+        $count = 0;
+        foreach ($orders as $order) {
+            $html .= "<div class='invoice-outer'><div class='invoice-inner'>";
+            $html .= $this->invoiceA4Html($order);
+            $html .= "</div>";
+            if ($count < count($orders) - 1) {
+                $html .= "<div class='divider'></div>";
+            }
+            $html .= "</div>";
+            $count++;
+        }
+        
+        $html .= "</body></html>";
+        return Pdf::loadHTML($html)->setPaper('a4')->output();
+    }
+
+    public function generateKitchenTicketPdf(Order $order, string $destination = 'kitchen', ?array $itemIds = null): string
+    {
+        $html = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/></head><body>" . $this->kitchenTicketHtml($order, $destination, $itemIds) . "</body></html>";
+        return Pdf::loadHTML($html)->setPaper([0, 0, 226.77, 600])->output();
+    }
+
+    /**
+     * Facture A4 pour une ardoise client (CustomerTab)
+     */
+    public function tabInvoiceA4Html(\App\Models\CustomerTab $tab): string
+    {
+        $restaurant = $tab->restaurant;
+        $customer = $tab->full_name;
+        $date = now()->format('d/m/Y');
+        $tab->load('orders.items.product');
+
+        $qrPath = public_path('img/website_qr.png');
+        $qrBase64 = null;
+        if (file_exists($qrPath)) {
+            $qrData = base64_encode(file_get_contents($qrPath));
+            $qrBase64 = 'data:image/png;base64,' . $qrData;
+        }
+
+        $html = "
+        <div style='padding: 15px; border: 1px solid #000; font-family: Arial, sans-serif; background: #fff; color: #000;'>
+            <table style='width: 100%; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 10px;'>
+                <tr>
+                    <td>
+                        <h1 style='margin: 0; font-size: 22px;'>" . strtoupper($restaurant->name) . "</h1>
+                        <p style='margin: 2px 0; font-size: 11px;'>{$restaurant->address}</p>
+                        <p style='margin: 2px 0; font-size: 11px;'>Tél: {$restaurant->phone}</p>
+                    </td>
+                    <td style='text-align: right; vertical-align: top;'>
+                        <h2 style='margin: 0; font-size: 18px;'>RELEVÉ D'ARDOISE</h2>
+                        <p style='margin: 2px 0; font-size: 11px;'>Client: " . strtoupper($customer) . "</p>
+                        <p style='margin: 2px 0; font-size: 11px;'>Date: {$date}</p>
+                    </td>
+                </tr>
+            </table>
+
+            <div style='margin: 10px 0; font-size: 12px; font-weight: bold;'>
+                DÉTAIL DES CONSOMMATIONS
+            </div>
+
+            <table style='width: 100%; border-collapse: collapse; font-size: 11px;'>
+                <thead>
+                    <tr style='background: #f0f0f0; border: 1px solid #000;'>
+                        <th style='padding: 6px; text-align: left; border: 1px solid #000;'>DESIGNATION</th>
+                        <th style='padding: 6px; text-align: center; border: 1px solid #000;'>QTE</th>
+                        <th style='padding: 6px; text-align: right; border: 1px solid #000;'>P.U</th>
+                        <th style='padding: 6px; text-align: right; border: 1px solid #000;'>TOTAL</th>
+                    </tr>
+                </thead>
+                <tbody>";
+
+        $grandTotal = 0;
+        foreach ($tab->orders as $order) {
+            if ($order->status === 'cancelled') continue;
+            foreach ($order->items as $item) {
+                if ($item->status === 'cancelled') continue;
+                $lineTotal = $item->unit_price * $item->quantity;
+                $grandTotal += $lineTotal;
+                $html .= "
+                <tr>
+                    <td style='padding: 5px; border: 1px solid #000;'>" . strtoupper($item->product?->name ?? $item->notes ?? 'ARTICLE LIBRE') . "</td>
+                    <td style='padding: 5px; text-align: center; border: 1px solid #000;'>{$item->quantity}</td>
+                    <td style='padding: 5px; text-align: right; border: 1px solid #000;'>" . number_format($item->unit_price, 0, ',', ' ') . "</td>
+                    <td style='padding: 5px; text-align: right; border: 1px solid #000;'>" . number_format($lineTotal, 0, ',', ' ') . "</td>
+                </tr>";
+            }
+        }
+
+        $paid = (float)$tab->paid_amount;
+        $remaining = max(0, $grandTotal - $paid);
+
+        $html .= "
+                </tbody>
+                <tfoot>
+                    <tr style='font-weight: bold;'>
+                        <td colspan='3' style='padding: 8px; text-align: right; border: 1px solid #000;'>TOTAL GÉNÉRAL</td>
+                        <td style='padding: 8px; text-align: right; border: 1px solid #000;'>" . number_format($grandTotal, 0, ',', ' ') . " FCFA</td>
+                    </tr>
+                    <tr>
+                        <td colspan='3' style='padding: 8px; text-align: right; border: 1px solid #000;'>DÉJÀ PAYÉ</td>
+                        <td style='padding: 8px; text-align: right; border: 1px solid #000;'>" . number_format($paid, 0, ',', ' ') . " FCFA</td>
+                    </tr>
+                    <tr style='background: #000; color: #fff;'>
+                        <td colspan='3' style='padding: 8px; text-align: right; border: 1px solid #000;'>RESTE À PAYER</td>
+                        <td style='padding: 8px; text-align: right; border: 1px solid #000; font-size: 14px;'><strong>" . number_format($remaining, 0, ',', ' ') . " FCFA</strong></td>
+                    </tr>
+                </tfoot>
+            </table>
+
+            <div style='margin-top: 20px; text-align: center;'>
+                <p style='font-size: 11px; margin-bottom: 10px;'>Veuillez solder votre ardoise dans les plus brefs délais. Merci !</p>
+                " . ($qrBase64 ? "<img src='{$qrBase64}' style='width: 70px; height: 70px; filter: grayscale(100%);'>" : "") . "
+                <p style='font-size: 8px; font-weight: bold; margin-top: 5px;'>Généré le " . now()->format('d/m/Y H:i') . "</p>
+            </div>
+        </div>";
+
+        return $html;
+    }
+
+    public function generateTabInvoicePdf(\App\Models\CustomerTab $tab): string
+    {
+        $content = $this->tabInvoiceA4Html($tab);
+        $html = "<html><head><style>body { font-family: Arial, sans-serif; color: #000; margin: 0; padding: 20px; } .wrapper { width: 180mm; margin: 0 auto; }</style></head><body><div class='wrapper'>{$content}</div></body></html>";
+        return Pdf::loadHTML($html)->setPaper('a4')->output();
+    }
+
+    private function methodLabel(string $method): string { return match($method) { 'cash' => 'Espèces', 'card' => 'Carte', 'wave' => 'Wave', 'moov' => 'Moov', 'mixx' => 'Mixx', 'orange_money' => 'Orange', 'momo' => 'Momo', default => ucfirst($method) }; }
+    private function typeLabel(string $type): string { 
+        return match($type) { 
+            'dine_in' => 'Sur place', 
+            'takeaway' => 'À emporter', 
+            'delivery' => 'Livraison', 
+            'gozem' => 'Gozem',
+            'cakes' => 'Gâteaux',
+            default => $type 
+        }; 
+    }
 }

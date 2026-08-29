@@ -1,10 +1,41 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 <!DOCTYPE html>
 <html>
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
     <style>
         @page { margin: 40px; }
-        body { font-family: 'Helvetica', sans-serif; color: #334155; font-size: 11px; line-height: 1.5; }
+        body { font-family: 'DejaVu Sans', sans-serif; color: #334155; font-size: 11px; line-height: 1.5; }
         .header { border-bottom: 2px solid #f1f5f9; padding-bottom: 20px; margin-bottom: 30px; }
         .restaurant-name { font-size: 20px; font-weight: bold; color: #1e293b; text-transform: uppercase; }
         .report-title { font-size: 14px; color: #f97316; font-weight: bold; margin-top: 5px; }
@@ -89,7 +120,7 @@
                 <td>{{ \Carbon\Carbon::parse($item->created_at)->format('H:i') }}</td>
                 <td>
                     <div class="product-name">{{ $item->product->name }}</div>
-                    <div class="table-id">ID: #{{ $item->id }}</div>
+                    <!-- ID removed -->
                 </td>
                 <td>
                     <span style="background: #f1f5f9; padding: 2px 5px; border-radius: 4px; font-size: 8px;">

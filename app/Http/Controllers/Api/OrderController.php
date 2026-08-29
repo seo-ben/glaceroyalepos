@@ -10,53 +10,184 @@ use App\Models\Delivery;
 use App\Events\OrderCreated;
 use App\Events\OrderReady;
 use App\Jobs\ProcessStockDeduction;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Carbon\Carbon;
 
 class OrderController extends Controller
 {
+    // -------------------------------------------------------------------------
+    // Liste des commandes
+    // -------------------------------------------------------------------------
+
     public function index(Request $request)
     {
-        $orders = Order::with([
-            'table', 'waiter', 'items.product',
-            'cancellations' => fn($q) => $q->where('status', 'pending'),
-            'items.cancellations' => fn($q) => $q->where('status', 'pending')
-        ])
-            ->where('restaurant_id', $request->user()->restaurant_id)
-            ->when($request->status, fn($q) => $q->where('status', $request->status))
-            ->when($request->table_id, fn($q) => $q->where('table_id', $request->table_id))
-            ->when($request->search, fn($q) => $q->where('order_number', 'like', "%{$request->search}%"))
-            ->when($request->date, fn($q) => $q->whereDate('created_at', $request->date))
-            ->when($request->type, fn($q) => $q->where('type', $request->type))
-            ->latest()
-            ->paginate(30);
+        $includeCakes = $request->has('include_cakes') || $request->type === 'cakes';
+
+        $query = Order::with([
+            'table', 'waiter', 'items.product.category',
+            'cancellations'       => fn($q) => $q->where('status', 'pending'),
+            'items.cancellations' => fn($q) => $q->where('status', 'pending'),
+        ])->where('restaurant_id', $request->user()->restaurant_id);
+
+        if ($request->filled('search')) {
+            $query->where(function ($q) use ($request) {
+                $term = '%' . strtolower(trim($request->search)) . '%';
+                $q->whereRaw('LOWER(order_number) LIKE ?',   [$term])
+                  ->orWhereRaw('LOWER(customer_name) LIKE ?', [$term])
+                  ->orWhereRaw('LOWER(customer_phone) LIKE ?', [$term])
+                  ->orWhereRaw('LOWER(server_name) LIKE ?',   [$term]);
+            });
+        } else {
+            $date = $request->date ?: now()->format('Y-m-d');
+            // Business day window: 06:00 -> 05:59:59 next day for the given date
+            $start = Carbon::parse($date)->setTime(6, 0, 0);
+            $end = (clone $start)->addDay()->setTime(5, 59, 59);
+
+            $query->whereBetween('created_at', [$start, $end])
+                ->when($request->status,   fn($q) => $q->where('status',   $request->status))
+                ->when($request->table_id, fn($q) => $q->where('table_id', $request->table_id))
+                ->when(
+                    $request->type && $request->type !== 'cakes',
+                    fn($q) => $q->where('type', $request->type)
+                );
+        }
+
+        $orders = $query->latest()->paginate($request->per_page ?? 30);
+
+        if ($includeCakes) {
+            $cakesQuery = \App\Models\CakeOrder::where('restaurant_id', $request->user()->restaurant_id);
+
+            if ($request->filled('search')) {
+                $cakesQuery->where(function ($q) use ($request) {
+                    $term = '%' . strtolower(trim($request->search)) . '%';
+                    $q->whereRaw('LOWER(order_number) LIKE ?',    [$term])
+                      ->orWhereRaw('LOWER(customer_name) LIKE ?', [$term])
+                      ->orWhereRaw('LOWER(customer_phone) LIKE ?', [$term]);
+                });
+            } else {
+                $date = $request->date ?: now()->format('Y-m-d');
+                $start = Carbon::parse($date)->setTime(6, 0, 0);
+                $end = (clone $start)->addDay()->setTime(5, 59, 59);
+                $cakesQuery->whereBetween('created_at', [$start, $end])
+                    ->when($request->status, fn($q) => $q->where('status', $request->status));
+            }
+
+            $cakes = $cakesQuery->latest()->get()->map(function ($cake) {
+                $cake->is_cake = true;
+                $cake->type    = 'cakes';
+                return $cake;
+            });
+
+            $items = collect($orders->items())->concat($cakes)->sortByDesc('created_at')->values();
+
+            return response()->json([
+                'data'         => $items,
+                'total'        => $orders->total() + $cakes->count(),
+                'per_page'     => $orders->perPage(),
+                'current_page' => $orders->currentPage(),
+                'last_page'    => $orders->lastPage(),
+            ]);
+        }
 
         return response()->json($orders);
     }
 
+    // -------------------------------------------------------------------------
+    // Compteurs actifs (Gozem / Takeaway)
+    // -------------------------------------------------------------------------
+
+    public function activeCounts(Request $request)
+    {
+        $restaurantId = $request->user()->restaurant_id;
+        $activeStatuses = ['open', 'sent_to_kitchen', 'partially_served', 'served'];
+
+        $start = Carbon::today()->setTime(6, 0, 0);
+        $end = (clone $start)->addDay()->setTime(5, 59, 59);
+
+        $gozemCount = Order::where('restaurant_id', $restaurantId)
+            ->whereBetween('created_at', [$start, $end])
+            ->where('type', 'gozem')
+            ->whereIn('status', $activeStatuses)
+            ->count();
+
+        $takeawayCount = Order::where('restaurant_id', $restaurantId)
+            ->whereBetween('created_at', [$start, $end])
+            ->where('type', 'takeaway')
+            ->whereIn('status', $activeStatuses)
+            ->count();
+
+        return response()->json([
+            'gozem'    => $gozemCount,
+            'takeaway' => $takeawayCount,
+        ]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Commandes actives en attente (takeaway / gozem / delivery)
+    // -------------------------------------------------------------------------
+
+    public function activePending(Request $request)
+    {
+        $restaurantId = $request->user()->restaurant_id;
+
+        $start = Carbon::today()->setTime(6, 0, 0);
+        $end = (clone $start)->addDay()->setTime(5, 59, 59);
+
+        $orders = Order::with(['items.product.category', 'waiter'])
+            ->where('restaurant_id', $restaurantId)
+            ->whereBetween('created_at', [$start, $end])
+            ->whereIn('type', ['takeaway', 'gozem', 'delivery'])
+            ->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served', 'served'])
+            ->latest()
+            ->get();
+
+        return response()->json($orders);
+    }
+
+    // -------------------------------------------------------------------------
+    // Commande courante par table
+    // -------------------------------------------------------------------------
+
     public function currentByTable(Request $request, int $tableId)
     {
+        if (!\App\Models\Table::where('id', $tableId)->exists()) {
+            $ip = $request->ip();
+            \App\Models\BlockedIp::firstOrCreate(
+                ['ip_address' => $ip],
+                ['reason' => "Auto-ban : Scan de table inexistante (ID: $tableId)"]
+            );
+            \Illuminate\Support\Facades\Cache::put('blocked_ip_' . $ip, true, 3600);
+            abort(403, "Table inexistante. Votre IP a été bloquée par sécurité.");
+        }
+
         $order = Order::with([
-                'items.product',
-                'items.modifiers.modifier',
-                'items.cancellations' => fn($q) => $q->where('status', 'pending'),
-                'waiter:id,first_name,last_name',
-                'logs' => fn($q) => $q->latest()->limit(20),
-                'cancellations' => fn($q) => $q->where('status', 'pending')
-            ])
+            'items.product.category',
+            'items.modifiers.modifier',
+            'items.cancellations' => fn($q) => $q->where('status', 'pending'),
+            'waiter:id,first_name,last_name',
+            'logs'                => fn($q) => $q->latest()->limit(20),
+            'cancellations'       => fn($q) => $q->where('status', 'pending'),
+        ])
             ->where('restaurant_id', $request->user()->restaurant_id)
             ->where('table_id', $tableId)
             ->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served', 'served'])
             ->latest()
             ->firstOrFail();
 
-        /** @var Order $order */
         return response()->json([
-            'order'        => $order,
-            'amount_paid'  => $order->amountPaid(),
-            'amount_due'   => $order->amountDue(),
+            'order'       => $order,
+            'amount_paid' => $order->amountPaid(),
+            'amount_due'  => $order->amountDue(),
         ]);
     }
+
+    // -------------------------------------------------------------------------
+    // Détail d'une commande
+    // -------------------------------------------------------------------------
 
     public function show(Request $request, Order $order)
     {
@@ -64,96 +195,182 @@ class OrderController extends Controller
 
         return response()->json(
             $order->load([
-                'items.product', 'items.modifiers.modifier',
+                'items.product.category', 'items.modifiers.modifier',
                 'payments', 'waiter', 'cashier', 'table',
                 'logs', 'delivery', 'cancellations',
             ])
         );
     }
 
+    // -------------------------------------------------------------------------
+    // Créer une commande — corrigé : generateNumber() thread-safe + retry
+    // -------------------------------------------------------------------------
+
     public function store(Request $request)
     {
         $request->validate([
-            'table_id'       => 'nullable|exists:tables,id',
-            'type'           => 'required|in:dine_in,takeaway,delivery,gozem',
-            'covers'         => 'integer|min:1',
-            'notes'          => 'nullable|string',
-            'customer_name'  => 'nullable|string|max:150',
-            'customer_phone' => 'nullable|string|max:20',
-            'items'          => 'required|array|min:1',
-            'items.*.product_id'   => 'required|exists:products,id',
-            'items.*.quantity'     => 'required|integer|min:1',
-            'items.*.notes'        => 'nullable|string',
-            'items.*.course'       => 'integer|min:1',
-            'items.*.modifier_ids' => 'nullable|array',
+            'table_id'               => 'nullable|exists:tables,id',
+            'type'                   => 'required|in:dine_in,takeaway,delivery,gozem',
+            'covers'                 => 'integer|min:1',
+            'notes'                  => 'nullable|string',
+            'customer_name'          => 'nullable|string|max:150',
+            'customer_phone'         => 'nullable|string|max:20',
+            'server_name'            => 'nullable|string|max:150',
+            'items'                  => 'required|array|min:1',
+            'items.*.product_id'     => 'nullable|exists:products,id',
+            'items.*.custom_name'    => 'nullable|string|max:200',
+            'items.*.unit_price'     => 'nullable|numeric|min:0',
+            'items.*.quantity'       => 'required|integer|min:1',
+            'items.*.notes'          => 'nullable|string',
+            'items.*.course'         => 'integer|min:1',
+            'items.*.modifier_ids'   => 'nullable|array',
             'items.*.modifier_ids.*' => 'exists:modifiers,id',
         ]);
 
-        $order = DB::transaction(function () use ($request) {
-            $order = Order::create([
-                'restaurant_id'  => $request->user()->restaurant_id,
-                'table_id'       => $request->table_id,
-                'user_id'        => $request->user()->id,
-                'order_number'   => Order::generateNumber($request->user()->restaurant_id),
-                'type'           => $request->type,
-                'covers'         => $request->covers ?? 1,
-                'notes'          => $request->notes,
-                'customer_name'  => $request->customer_name,
-                'customer_phone' => $request->customer_phone,
-                'status'         => 'open',
-            ]);
+        $maxAttempts = 3;
+        $attempt     = 0;
 
-            foreach ($request->items as $itemData) {
-                $product = Product::findOrFail($itemData['product_id']);
+        while ($attempt < $maxAttempts) {
+            try {
+                $order = DB::transaction(function () use ($request) {
 
-                $item = $order->items()->create([
-                    'product_id' => $product->id,
-                    'quantity'   => $itemData['quantity'],
-                    'unit_price' => $product->price,
-                    'subtotal'   => $product->price * $itemData['quantity'],
-                    'notes'      => $itemData['notes'] ?? null,
-                    'course'     => $itemData['course'] ?? 1,
-                    'status'     => 'pending',
-                ]);
+                    // generateNumber() avec lockForUpdate() DANS la transaction
+                    $orderNumber = Order::generateNumber($request->user()->restaurant_id);
 
-                if (!empty($itemData['modifier_ids'])) {
-                    foreach ($itemData['modifier_ids'] as $modifierId) {
-                        $modifier = \App\Models\Modifier::find($modifierId);
-                        $item->modifiers()->create([
-                            'modifier_id' => $modifierId,
-                            'extra_price' => $modifier?->extra_price ?? 0,
+                    $order = Order::create([
+                        'restaurant_id'  => $request->user()->restaurant_id,
+                        'table_id'       => $request->table_id,
+                        'user_id'        => $request->user()->id,
+                        'order_number'   => $orderNumber,
+                        'type'           => $request->type,
+                        'covers'         => $request->covers ?? 1,
+                        'notes'          => $request->notes,
+                        'customer_name'  => $request->customer_name,
+                        'customer_phone' => $request->customer_phone,
+                        'server_name'    => $request->server_name,
+                        'status'         => 'open',
+                    ]);
+
+                    foreach ($request->items as $itemData) {
+                        $productId = $itemData['product_id'] ?? null;
+                        $unitPrice = $itemData['unit_price'] ?? 0;
+
+                        if ($productId) {
+                            $product   = Product::findOrFail($productId);
+                            $unitPrice = $product->price;
+                        }
+
+                        $item = $order->items()->create([
+                            'product_id'  => $productId,
+                            'quantity'    => $itemData['quantity'],
+                            'unit_price'  => $unitPrice,
+                            'subtotal'    => $unitPrice * $itemData['quantity'],
+                            'notes'       => $itemData['notes'] ?? $itemData['custom_name'] ?? null,
+                            'course'      => $itemData['course'] ?? 1,
+                            'status'      => 'pending',
+                            'is_takeaway' => $itemData['is_takeaway'] ?? false,
+                        ]);
+
+                        if (!empty($itemData['modifier_ids'])) {
+                            foreach ($itemData['modifier_ids'] as $modifierId) {
+                                $modifier = \App\Models\Modifier::find($modifierId);
+                                $item->modifiers()->create([
+                                    'modifier_id' => $modifierId,
+                                    'extra_price' => $modifier?->extra_price ?? 0,
+                                ]);
+                            }
+                        }
+                    }
+
+                    $order->recalculate();
+
+                    if ($request->table_id) {
+                        Table::where('id', $request->table_id)->update([
+                            'status'           => 'occupied',
+                            'occupied_since'   => now(),
+                            'assigned_user_id' => $request->user()->id,
                         ]);
                     }
+
+                    if (in_array($request->type, ['gozem', 'delivery'])) {
+                        $order->delivery()->create([
+                            'restaurant_id'  => $order->restaurant_id,
+                            'customer_name'  => $order->customer_name ?? 'Client Gozem',
+                            'customer_phone' => $order->customer_phone ?? '0000',
+                            'address'        => 'Via Gozem App',
+                            'status'         => 'pending',
+                        ]);
+                    }
+
+                    $order->logActivity(
+                        'order_created',
+                        "Commande {$order->order_number} créée par {$request->user()->full_name}"
+                    );
+
+                    return $order;
+                });
+
+                // Transaction réussie — on retourne la réponse
+                return response()->json($order->load('items.product.category'), 201);
+
+            } catch (UniqueConstraintViolationException $e) {
+                $attempt++;
+                if ($attempt >= $maxAttempts) {
+                    return response()->json([
+                        'message' => 'Impossible de générer un numéro de commande unique. Veuillez réessayer.',
+                    ], 500);
                 }
+                // Pause exponentielle avant retry : 100ms, 200ms
+                usleep(100000 * $attempt);
             }
-
-            $order->recalculate();
-
-            if ($request->table_id) {
-                Table::where('id', $request->table_id)->update([
-                    'status'         => 'occupied',
-                    'occupied_since' => now(),
-                    'assigned_user_id' => $request->user()->id,
-                ]);
-            }
-
-            if ($request->type === 'gozem' || $request->type === 'delivery') {
-                $order->delivery()->create([
-                    'restaurant_id'  => $order->restaurant_id,
-                    'customer_name'  => $order->customer_name ?? 'Client Gozem',
-                    'customer_phone' => $order->customer_phone ?? '0000',
-                    'address'        => 'Via Gozem App', // Valeur par défaut pour Gozem
-                    'status'         => 'pending'
-                ]);
-            }
-
-            $order->logActivity('order_created', "Commande {$order->order_number} créée par {$request->user()->full_name}");
-
-            return $order;
-        });
-
-        return response()->json($order->load('items.product'), 201);
+        }
     }
+
+    // -------------------------------------------------------------------------
+    // Modifier une commande (type, couverts, notes, serveur)
+    // -------------------------------------------------------------------------
+
+    public function update(Request $request, Order $order)
+    {
+        $this->authorizeOrder($request, $order);
+
+        $request->validate([
+            'type'        => 'nullable|in:dine_in,takeaway,delivery,gozem',
+            'covers'      => 'nullable|integer|min:1',
+            'notes'       => 'nullable|string',
+            'server_name' => 'nullable|string|max:150',
+        ]);
+
+        $oldType = $order->type;
+        $order->update($request->only(['type', 'covers', 'notes', 'server_name']));
+
+        // Si on passe de dine_in à un autre type, on libère la table si elle est vide
+        if ($oldType === 'dine_in' && $order->type !== 'dine_in' && $order->table_id) {
+            $otherOpen = Order::where('table_id', $order->table_id)
+                ->where('id', '!=', $order->id)
+                ->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served'])
+                ->exists();
+
+            if (!$otherOpen && $order->table) {
+                $order->table->update([
+                    'status'           => 'available',
+                    'occupied_since'   => null,
+                    'assigned_user_id' => null,
+                ]);
+            }
+        }
+
+        if ($oldType !== $order->type) {
+            $order->recalculate();
+            $order->logActivity('type_updated', "Type de commande changé : {$oldType} → {$order->type}");
+        }
+
+        return response()->json($order->fresh());
+    }
+
+    // -------------------------------------------------------------------------
+    // Envoyer en cuisine
+    // -------------------------------------------------------------------------
 
     public function sendToKitchen(Request $request, Order $order)
     {
@@ -162,7 +379,7 @@ class OrderController extends Controller
         $this->authorizeOrder($request, $order);
 
         $request->validate([
-            'item_ids' => 'nullable|array',
+            'item_ids'   => 'nullable|array',
             'item_ids.*' => 'exists:order_items,id',
         ]);
 
@@ -173,10 +390,17 @@ class OrderController extends Controller
             $itemsQuery->whereIn('id', $request->item_ids);
         }
 
-        $items = $itemsQuery->get();
-        abort_if($items->isEmpty(), 422, 'Aucun item à envoyer en cuisine.');
+        $items       = $itemsQuery->get();
+        $sentItemIds = $items->pluck('id')->toArray();
 
-        DB::transaction(function () use ($request, $order, $items) {
+        if ($items->isEmpty()) {
+            return response()->json([
+                'message' => 'Tous les articles sont déjà en cuisine.',
+                'tickets' => [],
+            ]);
+        }
+
+        DB::transaction(function () use ($order, $items, $sentItemIds) {
             $items->each->update(['status' => 'preparing', 'sent_at' => now()]);
 
             $order->update([
@@ -184,32 +408,34 @@ class OrderController extends Controller
                 'sent_to_kitchen_at' => $order->sent_to_kitchen_at ?? now(),
             ]);
 
-            $order->logActivity('sent_to_kitchen', count($items) . " article(s) envoyé(s) en cuisine", ['item_ids' => $items->pluck('id')]);
+            $order->logActivity(
+                'sent_to_kitchen',
+                count($items) . " article(s) envoyé(s) en cuisine",
+                ['item_ids' => $sentItemIds]
+            );
         });
 
-        broadcast(new OrderCreated($order->load('items.product', 'table')))->toOthers();
-        
-        // Générer les tickets pour l'impression (Cuisine, Bar, Pizza)
-        $tickets = [];
+        broadcast(new OrderCreated($order->load('items.product.category', 'table')))->toOthers();
+
+        $tickets      = [];
         $destinations = ['kitchen', 'bar', 'pizza'];
 
         foreach ($destinations as $dest) {
-            $html = $ticketService->kitchenTicketHtml($order, $dest);
+            $html = $ticketService->kitchenTicketHtml($order, $dest, $sentItemIds);
             if ($html) {
-                $tickets[] = [
-                    'destination' => $dest,
-                    'html' => $html
-                ];
+                $tickets[] = ['destination' => $dest, 'html' => $html];
             }
         }
 
-        $message = 'Commande envoyée en cuisine.';
-
         return response()->json([
-            'message' => $message,
-            'tickets' => $tickets
+            'message' => 'Commande envoyée en cuisine.',
+            'tickets' => $tickets,
         ]);
     }
+
+    // -------------------------------------------------------------------------
+    // Modifier les articles d'une commande
+    // -------------------------------------------------------------------------
 
     public function updateItems(Request $request, Order $order)
     {
@@ -222,98 +448,207 @@ class OrderController extends Controller
             'items.*.notes'    => 'nullable|string|max:300',
         ]);
 
-        abort_if(in_array($order->status, ['paid', 'cancelled']), 422, 'Impossible de modifier une commande finalisée.');
+        abort_if(
+            in_array($order->status, ['paid', 'cancelled']),
+            422,
+            'Impossible de modifier une commande finalisée.'
+        );
 
-        DB::transaction(function () use ($request, $order) {
+        $modifiedItemIds = [];
+
+        DB::transaction(function () use ($request, $order, &$modifiedItemIds) {
             foreach ($request->items as $data) {
-                $item = $order->items()->findOrFail($data['id']);
+                $item           = $order->items()->findOrFail($data['id']);
+                $isServedOrPreparing = in_array($item->status, ['done', 'preparing', 'served']);
 
-                if ($item->status === 'done' && $data['quantity'] < $item->quantity) {
-                    abort_unless($request->user()->isManager(), 403, 'Manager requis pour annuler un article servi.');
+                if ($isServedOrPreparing && $data['quantity'] < $item->quantity) {
+                    $user = $request->user();
+                    $user->loadMissing('role');
+
+                    if (!$user->isManager() && !$user->hasRole('cashier')) {
+                        abort(403, 'Permission refusée : Seul un Admin, Manager ou Caissier peut réduire un article déjà envoyé en cuisine.');
+                    }
                 }
 
                 if ($data['quantity'] === 0) {
-                    $order->logActivity('item_removed', "{$item->product->name} supprimé de la commande");
+                    $itemName = $item->product?->name ?? $item->notes ?? 'Article';
+                    $order->logActivity('item_removed', "{$itemName} supprimé de la commande");
                     $item->delete();
                 } else {
-                    $wasServed = $item->status === 'done';
-                    $item->update([
-                        'quantity' => $data['quantity'],
-                        'subtotal' => $item->unit_price * $data['quantity'],
-                        'notes'    => $data['notes'] ?? $item->notes,
-                        'status'   => ($data['quantity'] > $item->quantity && $wasServed) ? 'pending' : $item->status,
-                    ]);
+                    $oldQty    = $item->quantity;
+                    $wasServed = in_array($item->status, ['done', 'preparing', 'served']);
 
-                    $order->logActivity('item_updated', "{$item->product->name} : qté → {$data['quantity']}");
+                    if (isset($data['quantity']) && $data['quantity'] > $oldQty && $wasServed) {
+                        // Augmentation d'un article déjà en cuisine → on crée un delta
+                        $delta   = $data['quantity'] - $oldQty;
+                        $newItem = $order->items()->create([
+                            'product_id'  => $item->product_id,
+                            'quantity'    => $delta,
+                            'unit_price'  => $item->unit_price,
+                            'subtotal'    => $item->unit_price * $delta,
+                            'notes'       => $data['notes'] ?? $item->notes,
+                            'course'      => $item->course,
+                            'status'      => 'pending',
+                            'is_takeaway' => $data['is_takeaway'] ?? $item->is_takeaway,
+                        ]);
+                        $modifiedItemIds[] = $newItem->id;
+
+                        $itemName = $item->product?->name ?? $item->notes ?? 'Article';
+                        $order->logActivity('item_updated', "{$itemName} : +{$delta} supplémentaire(s) à envoyer en cuisine");
+                    } else {
+                        $updateData = [];
+                        if (isset($data['quantity'])) {
+                            $updateData['quantity'] = $data['quantity'];
+                            $updateData['subtotal'] = $item->unit_price * $data['quantity'];
+                        }
+                        if (isset($data['notes']))       $updateData['notes']       = $data['notes'];
+                        if (isset($data['is_takeaway'])) $updateData['is_takeaway'] = $data['is_takeaway'];
+                        if (isset($data['course']))      $updateData['course']      = $data['course'];
+
+                        if (!empty($updateData)) {
+                            $item->update($updateData);
+                            $itemName = $item->product?->name ?? $item->notes ?? 'Article';
+                            $order->logActivity('item_updated', "{$itemName} mis à jour");
+                        }
+                    }
                 }
             }
 
             $order->recalculate();
         });
 
-        return response()->json($order->fresh(['items.product', 'items.modifiers']));
+        return response()->json([
+            'order'              => $order->fresh(['items.product.category', 'items.modifiers']),
+            'modified_item_ids'  => $modifiedItemIds,
+        ]);
     }
+
+    // -------------------------------------------------------------------------
+    // Ajouter des articles à une commande
+    // -------------------------------------------------------------------------
 
     public function addItems(Request $request, Order $order)
     {
         $this->authorizeOrder($request, $order);
 
         $request->validate([
-            'items'              => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
-            'items.*.quantity'   => 'required|integer|min:1',
-            'items.*.notes'      => 'nullable|string',
-            'items.*.course'     => 'integer|min:1',
+            'items'                  => 'nullable|array',
+            'items.*.product_id'     => 'nullable|exists:products,id',
+            'items.*.custom_name'    => 'nullable|string|max:200',
+            'items.*.unit_price'     => 'nullable|numeric|min:0',
+            'items.*.quantity'       => 'required|integer|min:1',
+            'items.*.notes'          => 'nullable|string',
+            'items.*.course'         => 'integer|min:1',
+            'items.*.modifier_ids'   => 'nullable|array',
+            'items.*.modifier_ids.*' => 'exists:modifiers,id',
+            'notes'                  => 'nullable|string',
         ]);
 
         abort_if(in_array($order->status, ['paid', 'cancelled']), 422, 'Commande finalisée.');
 
         DB::transaction(function () use ($request, $order) {
-            foreach ($request->items as $data) {
-                $product = Product::findOrFail($data['product_id']);
-                $order->items()->create([
-                    'product_id' => $product->id,
-                    'quantity'   => $data['quantity'],
-                    'unit_price' => $product->price,
-                    'subtotal'   => $product->price * $data['quantity'],
-                    'notes'      => $data['notes'] ?? null,
-                    'course'     => $data['course'] ?? 1,
-                    'status'     => 'pending',
-                ]);
-            }
-            $order->recalculate();
+            if ($request->items && is_array($request->items)) {
+                foreach ($request->items as $itemData) {
+                    $productId = $itemData['product_id'] ?? null;
+                    $unitPrice = $itemData['unit_price'] ?? 0;
 
-            $order->logActivity('items_added', count($request->items) . " article(s) ajouté(s)");
+                    if ($productId) {
+                        $product   = Product::findOrFail($productId);
+                        $unitPrice = $product->price;
+                    }
+
+                    $item = $order->items()->create([
+                        'product_id'  => $productId,
+                        'quantity'    => $itemData['quantity'],
+                        'unit_price'  => $unitPrice,
+                        'subtotal'    => $unitPrice * $itemData['quantity'],
+                        'notes'       => $itemData['notes'] ?? $itemData['custom_name'] ?? null,
+                        'course'      => $itemData['course'] ?? 1,
+                        'status'      => 'pending',
+                        'is_takeaway' => $itemData['is_takeaway'] ?? false,
+                    ]);
+
+                    if (!empty($itemData['modifier_ids'])) {
+                        foreach ($itemData['modifier_ids'] as $modifierId) {
+                            $modifier = \App\Models\Modifier::find($modifierId);
+                            $item->modifiers()->create([
+                                'modifier_id' => $modifierId,
+                                'extra_price' => $modifier?->extra_price ?? 0,
+                            ]);
+                        }
+                    }
+                }
+            }
+
+            if ($request->has('notes')) {
+                $order->update(['notes' => $request->notes]);
+            }
+
+            $order->recalculate();
+            $order->logActivity('items_added', count($request->items ?? []) . " article(s) ajouté(s)");
         });
 
-        return response()->json($order->fresh('items.product'));
+        return response()->json($order->fresh('items.product.category'));
     }
+
+    // -------------------------------------------------------------------------
+    // Appliquer une remise
+    // -------------------------------------------------------------------------
 
     public function applyDiscount(Request $request, Order $order)
     {
         $this->authorizeOrder($request, $order);
-        abort_unless($request->user()->isManager(), 403, 'Manager requis pour appliquer une remise.');
 
         $request->validate([
             'type'   => 'required|in:percent,fixed',
             'value'  => 'required|numeric|min:0',
             'reason' => 'required|string',
+            'pin'    => 'nullable|string|min:4|max:6',
         ]);
+
+        $user          = $request->user();
+        $authorizerName = null;
+
+        if ($request->pin) {
+            $manager = User::where('restaurant_id', $user->restaurant_id)
+                ->where('active', true)
+                ->whereHas('role', fn($q) => $q->whereIn('name', ['admin', 'manager']))
+                ->get()
+                ->first(fn($u) => Hash::check($request->pin, $u->pin));
+
+            if (!$manager) {
+                return response()->json(['message' => 'PIN manager incorrect.'], 403);
+            }
+            $authorizerName = $manager->full_name;
+        } else {
+            abort_unless($user->isManager(), 403, 'PIN requis pour appliquer une remise.');
+            $authorizerName = $user->full_name;
+        }
 
         $discount = $request->type === 'percent'
             ? round($order->subtotal * $request->value / 100, 2)
             : min($request->value, $order->subtotal);
 
         $order->update([
-            'discount_amount' => $discount,
-            'discount_reason' => $request->reason,
+            'discount_type'            => $request->type,
+            'discount_value'           => $request->value,
+            'discount_amount'          => $discount,
+            'discount_reason'          => $request->reason,
+            'discount_authorizer_name' => $authorizerName,
         ]);
         $order->recalculate();
 
-        $order->logActivity('discount_applied', "Remise de {$discount} FCFA appliquée ({$request->reason})");
+        $order->logActivity(
+            'discount_applied',
+            "Remise de {$discount} FCFA appliquée. Autorisée par : {$authorizerName} ({$request->reason})"
+        );
 
         return response()->json($order->fresh());
     }
+
+    // -------------------------------------------------------------------------
+    // Mettre à jour le statut
+    // -------------------------------------------------------------------------
 
     public function updateStatus(Request $request, Order $order)
     {
@@ -321,30 +656,38 @@ class OrderController extends Controller
 
         $request->validate([
             'status' => 'required|in:open,sent_to_kitchen,partially_served,served,paid,cancelled,cancelling',
-            'reason' => 'required_if:status,cancelled|string|min:5'
+            'reason' => 'required_if:status,cancelled|string|min:5',
         ], [
-            'reason.required_if' => 'Un motif d\'annulation est obligatoire.'
+            'reason.required_if' => "Un motif d'annulation est obligatoire.",
         ]);
 
         $oldStatus = $order->status;
         $order->update(['status' => $request->status]);
 
-        if ($request->status === 'paid' || $request->status === 'served') {
+        if (in_array($request->status, ['paid', 'served'])) {
             $order->items()
                 ->whereNotIn('status', ['cancelled', 'served'])
                 ->update(['status' => 'served', 'served_at' => now()]);
         }
-        
+
         if ($request->status === 'cancelled') {
-            $order->logActivity('order_cancelled', "Commande {$order->order_number} annulée. Motif: {$request->reason}");
-            // Si la table était occupée, on la libère si c'est la seule commande ouverte
+            $order->logActivity(
+                'order_cancelled',
+                "Commande {$order->order_number} annulée. Motif: {$request->reason}"
+            );
+
             if ($order->table_id) {
                 $otherOpen = Order::where('table_id', $order->table_id)
                     ->where('id', '!=', $order->id)
                     ->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served'])
                     ->exists();
+
                 if (!$otherOpen && $order->table) {
-                    $order->table->update(['status' => 'available', 'occupied_since' => null, 'assigned_user_id' => null]);
+                    $order->table->update([
+                        'status'           => 'available',
+                        'occupied_since'   => null,
+                        'assigned_user_id' => null,
+                    ]);
                 }
             }
         } else {
@@ -354,15 +697,19 @@ class OrderController extends Controller
         return response()->json($order);
     }
 
+    // -------------------------------------------------------------------------
+    // Transférer une commande vers une autre table
+    // -------------------------------------------------------------------------
+
     public function transfer(Request $request, Order $order)
     {
         $this->authorizeOrder($request, $order);
-        
+
         $request->validate([
             'target_table_id' => 'required|exists:tables,id',
         ]);
 
-        $oldTableId = $order->table_id;
+        $oldTableId    = $order->table_id;
         $targetTableId = $request->target_table_id;
 
         if ($oldTableId == $targetTableId) {
@@ -370,40 +717,113 @@ class OrderController extends Controller
         }
 
         DB::transaction(function () use ($order, $oldTableId, $targetTableId, $request) {
-            // Libérer l'ancienne table si c'était sa seule commande
             if ($oldTableId) {
                 $otherOrders = Order::where('table_id', $oldTableId)
                     ->where('id', '!=', $order->id)
                     ->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served'])
                     ->exists();
-                
+
                 if (!$otherOrders) {
                     Table::where('id', $oldTableId)->update([
-                        'status' => 'available',
-                        'occupied_since' => null,
-                        'assigned_user_id' => null
+                        'status'           => 'available',
+                        'occupied_since'   => null,
+                        'assigned_user_id' => null,
                     ]);
                 }
             }
 
-            // Occuper la nouvelle table
             Table::where('id', $targetTableId)->update([
-                'status' => 'occupied',
-                'occupied_since' => now(),
-                'assigned_user_id' => $request->user()->id
+                'status'           => 'occupied',
+                'occupied_since'   => now(),
+                'assigned_user_id' => $request->user()->id,
             ]);
 
-            // Transférer la commande
             $order->update(['table_id' => $targetTableId]);
 
-            $order->logActivity('order_transferred', "Commande déplacée de Table {$oldTableId} vers Table {$targetTableId}");
+            $order->logActivity(
+                'order_transferred',
+                "Commande déplacée de Table {$oldTableId} vers Table {$targetTableId}"
+            );
         });
 
         return response()->json(['message' => 'Commande transférée avec succès.']);
     }
 
+    // -------------------------------------------------------------------------
+    // Réouvrir une commande payée ou annulée
+    // -------------------------------------------------------------------------
+
+    public function reopen(Request $request, Order $order)
+    {
+        $this->authorizeOrder($request, $order);
+
+        $user = $request->user();
+        $user->loadMissing('role');
+
+        if (!$user->isManager()) {
+            abort(403, 'Permission refusée : Seul le Boss peut réouvrir une commande finalisée.');
+        }
+
+        if (!in_array($order->status, ['paid', 'cancelled'])) {
+            abort(422, "Impossible de réouvrir cette commande car elle n'est pas finalisée (Statut actuel : {$order->status}).");
+        }
+
+        $payment = $order->payments()->first();
+        if ($payment && $payment->cash_session_id) {
+            $session = \App\Models\CashSession::find($payment->cash_session_id);
+            if ($session && $session->closed_at) {
+                abort(422, "Impossible de réouvrir cette commande car elle appartient à une session de caisse déjà clôturée (#{$session->id}).");
+            }
+        }
+
+        $oldStatus = $order->status;
+        $totalPaid = $order->amountPaid();
+
+        DB::transaction(function () use ($order, $oldStatus, $totalPaid, $user) {
+            $order->payments()->delete();
+
+            $order->update([
+                'status'     => 'open',
+                'paid_at'    => null,
+                'cashier_id' => null,
+            ]);
+
+            if ($order->table_id) {
+                $table = $order->table;
+                if ($table && in_array(strtolower($table->status), ['available', 'free'])) {
+                    $table->update([
+                        'status'           => 'occupied',
+                        'occupied_since'   => now(),
+                        'assigned_user_id' => $user->id,
+                    ]);
+                }
+            }
+
+            $order->logActivity(
+                'order_reopened',
+                "Commande payée réouverte pour modifications par l'Admin {$user->full_name}. Règlements précédents annulés (Total : {$totalPaid} FCFA). Statut précédent : {$oldStatus}",
+                [
+                    'reopened_by'               => $user->id,
+                    'previous_status'           => $oldStatus,
+                    'cancelled_payments_total'  => $totalPaid,
+                ]
+            );
+        });
+
+        return response()->json([
+            'message' => 'La commande a été réouverte avec succès.',
+            'order'   => $order->fresh(['items.product.category', 'payments', 'table']),
+        ]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Autorisation
+    // -------------------------------------------------------------------------
+
     private function authorizeOrder(Request $request, Order $order): void
     {
-        abort_if($order->restaurant_id !== $request->user()->restaurant_id, 403);
+        if ($order->restaurant_id != $request->user()->restaurant_id) {
+            abort(403, "Accès refusé : Cette commande n'appartient pas à votre établissement (Ord:{$order->restaurant_id}, Usr:{$request->user()->restaurant_id})");
+        }
     }
 }
