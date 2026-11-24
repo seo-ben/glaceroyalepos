@@ -111,12 +111,12 @@
 
   <div class="divider"></div>
   <table style="font-size:10px; line-height: 1.2; font-weight: bold;">
-    <tr><td>Sous-total (TTC)</td><td class="td-right">{{ $receipt['totals']['subtotal_fmt'] }}</td></tr>
+    <tr><td>MONTANT TOTAL HT</td><td class="td-right">{{ $receipt['totals']['subtotal_ht_fmt'] ?? $receipt['totals']['subtotal_fmt'] }}</td></tr>
     @if($receipt['totals']['discount'] > 0)
       <tr><td>{{ $receipt['totals']['discount_reason'] ?: 'REMISE' }}</td><td class="td-right">{{ $receipt['totals']['discount_fmt'] }}</td></tr>
     @endif
     <tr><td>TVA ({{ $receipt['totals']['vat_rate'] }}%)</td><td class="td-right">{{ $receipt['totals']['vat_fmt'] }}</td></tr>
-    <tr class="total-row"><td class="large">TOTAL NET (TTC)</td><td class="td-right large">{{ $receipt['totals']['total_fmt'] }}</td></tr>
+    <tr class="total-row"><td class="large">TOTAL NET TTC</td><td class="td-right large">{{ $receipt['totals']['total_fmt'] }}</td></tr>
     @if(!empty($receipt['payments']))
       <tr>
         <td style="padding-top: 4px;">Paiement :</td>
@@ -156,7 +156,7 @@
 
     @if($qrBase64)
     <div style="margin-top: 8px; text-align: center;">
-      <img src="{{ $qrBase64 }}" style="width: 60px; height: 60px; filter: grayscale(100%); display: inline-block;">
+      <img src="{{ $qrBase64 }}" alt="QR Code" style="width: 60px; height: 60px; filter: grayscale(100%); display: inline-block;">
     </div>
     @endif
 

@@ -225,16 +225,24 @@ class CakeOrderController extends Controller
     }
 
     /**
-     * Générer un PDF professionnel (Bon de commande) via DomPDF
+     * Générer un PDF A4 professionnel (Facture Normalisée si payé, Bon de commande si acompte)
      */
-    public function receiptPdf(CakeOrder $cakeOrder)
+    public function receiptPdf(Request $request, CakeOrder $cakeOrder)
     {
         $cakeOrder->load(['restaurant', 'cashier']);
-        $pdfContent = app(\App\Services\TicketPrintService::class)->generateCakeOrderA4Pdf($cakeOrder);
-        
+        $forceInvoice = $request->get('type') === 'invoice';
+        $isPaid = $cakeOrder->is_paid || (float)$cakeOrder->remaining_amount <= 0 || $forceInvoice;
+
+        $htmlContent = app(\App\Services\TicketPrintService::class)->cakeOrderA4Html($cakeOrder, $forceInvoice);
+        $html = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/><style>@page { margin: 10mm; } body { font-family: 'DejaVu Sans', sans-serif; margin: 0; padding: 0; background: #fff; } .copy-wrapper { width: 100%; }</style></head><body><div class='copy-wrapper'>{$htmlContent}</div></body></html>";
+
+        $pdfContent = \Barryvdh\DomPDF\Facade\Pdf::loadHTML($html)->setPaper('a4')->output();
+
+        $filename = $isPaid ? "Facture_{$cakeOrder->order_number}.pdf" : "Confirmation_Gateau_{$cakeOrder->order_number}.pdf";
+
         return response($pdfContent)
             ->header('Content-Type', 'application/pdf')
-            ->header('Content-Disposition', "attachment; filename=\"Confirmation_Gateau_{$cakeOrder->order_number}.pdf\"");
+            ->header('Content-Disposition', "attachment; filename=\"{$filename}\"");
     }
 
     /**

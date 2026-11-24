@@ -121,4 +121,91 @@ class StockController extends Controller
         $recipe = Recipe::with('ingredient')->where('product_id', $productId)->get();
         return response()->json($recipe);
     }
+
+    /**
+     * Générer le rapport PDF A4 du stock (Ce qui reste & Ce qui manque)
+     */
+    public function reportPdf(Request $request)
+    {
+        try {
+            $user = $request->user();
+            $restaurantId = $user?->restaurant_id;
+            
+            $restaurant = $user?->restaurant 
+                ?? ($restaurantId ? \App\Models\Restaurant::find($restaurantId) : null) 
+                ?? \App\Models\Restaurant::first();
+                
+            $restaurantId = $restaurantId ?? $restaurant?->id;
+
+            // 1. Ingrédients du stock
+            $queryIng = Ingredient::query()->where('active', true);
+            if ($restaurantId) {
+                $queryIng->where('restaurant_id', $restaurantId);
+            }
+            $ingredients = $queryIng->orderBy('category')->orderBy('name')->get()->map(function($i) {
+                $i->is_product = false;
+                return $i;
+            });
+
+            // 2. Produits de vente avec suivi du stock activé (crochés en stock)
+            $queryProd = \App\Models\Product::with('category')
+                ->where('active', true)
+                ->where(function($q) {
+                    $q->where('track_stock', true)
+                      ->orWhere('track_stock', 1)
+                      ->orWhere('track_stock', '1')
+                      ->orWhere('track_stock', 'true');
+                });
+
+            if ($restaurantId) {
+                $queryProd->where('restaurant_id', $restaurantId);
+            }
+            $productsInStock = $queryProd->get()->map(function($p) {
+                return (object)[
+                    'id'            => 'p_' . $p->id,
+                    'name'          => $p->name . ' [Produit Vente]',
+                    'category'      => $p->category?->name ?? 'Produits Vente',
+                    'unit'          => $p->unit ?? 'pièce',
+                    'quantity'      => (float)($p->quantity ?? 0),
+                    'min_quantity'  => (float)($p->min_quantity ?? 0),
+                    'cost_per_unit' => (float)($p->cost_price ?: $p->price),
+                    'is_product'    => true,
+                ];
+            });
+
+            // Fusionner tous les articles gérés en stock (Ingrédients + Produits Vente)
+            $allItems = $ingredients->concat($productsInStock)->sortBy(fn($item) => strtolower($item->name))->values();
+
+            $alerts = $allItems->filter(fn($i) => (float)$i->quantity <= (float)$i->min_quantity);
+            $totalValue = $allItems->sum(fn($i) => (float)$i->quantity * (float)$i->cost_per_unit);
+            $totalItems = $allItems->count();
+            $userName = $user ? trim("{$user->first_name} {$user->last_name}") : 'Gestionnaire POS';
+
+            $html = view('reports.stock-pdf', [
+                'restaurant'  => $restaurant,
+                'ingredients' => $allItems,
+                'alerts'      => $alerts,
+                'totalValue'  => $totalValue,
+                'totalItems'  => $totalItems,
+                'userName'    => $userName,
+            ])->render();
+
+            $pdfContent = \Barryvdh\DomPDF\Facade\Pdf::loadHTML($html)
+                ->setPaper('a4', 'portrait')
+                ->setOption('isRemoteEnabled', true)
+                ->output();
+
+            $filename = "Rapport_Stock_" . date('Y-m-d') . ".pdf";
+
+            return response($pdfContent, 200)
+                ->header('Content-Type', 'application/pdf')
+                ->header('Content-Disposition', "attachment; filename=\"{$filename}\"");
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error("Stock PDF Error: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+            return response()->json([
+                'error' => true,
+                'message' => 'Erreur lors de la génération du PDF du stock: ' . $e->getMessage()
+            ], 500);
+        }
+    }
 }

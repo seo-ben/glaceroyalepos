@@ -221,6 +221,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('ingredients-categories',             [Api\IngredientController::class, 'categories']);
     Route::get('stock/alerts',                       [Api\StockController::class, 'alerts']);
     Route::get('stock/value',                        [Api\StockController::class, 'value']);
+    Route::get('stock/pdf',                          [Api\StockController::class, 'reportPdf']);
     Route::post('stock/movements',                   [Api\StockController::class, 'createMovement']);
     Route::get('ingredients/{ingredient}/movements', [Api\StockController::class, 'movements']);
 

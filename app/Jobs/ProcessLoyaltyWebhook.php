@@ -48,9 +48,9 @@ class ProcessLoyaltyWebhook implements ShouldQueue
         $signature = $secret ? hash_hmac('sha256', $body, $secret) : '';
 
         try {
-            Log::info("Sending Loyalty Webhook for Order #{$this->order->order_number} to {$webhookUrl}", $payload);
+            Log::info("Sending Loyalty Webhook for Order #{$this->order->order_number} (Token: {$this->order->loyalty_token}) to {$webhookUrl}", $payload);
             
-            $request = Http::timeout(10);
+            $request = Http::timeout(15)->withoutVerifying();
             
             if ($secret) {
                 $request = $request->withHeaders([
@@ -61,14 +61,12 @@ class ProcessLoyaltyWebhook implements ShouldQueue
             $response = $request->withBody($body, 'application/json')->post($webhookUrl);
 
             if ($response->successful()) {
-                Log::info("Loyalty Webhook success for Order #{$this->order->order_number}");
+                Log::info("Loyalty Webhook success for Order #{$this->order->order_number}: " . $response->body());
             } else {
-                Log::error("Loyalty Webhook failed for Order #{$this->order->order_number}: " . $response->body());
+                Log::error("Loyalty Webhook failed with HTTP status {$response->status()} for Order #{$this->order->order_number}: " . $response->body());
             }
         } catch (\Exception $e) {
             Log::error("Loyalty Webhook exception for Order #{$this->order->order_number}: " . $e->getMessage());
-            // Optionally, throw exception to retry the job
-            // throw $e;
         }
     }
 }

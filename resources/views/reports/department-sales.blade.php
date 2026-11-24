@@ -1,34 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 <!DOCTYPE html>
 <html>
 <head>
@@ -68,7 +37,7 @@
                 </td>
                 <td width="30%" align="right">
                     @if($restaurant->logo)
-                        <img src="{{ public_path('storage/' . $restaurant->logo) }}" style="max-height: 50px; margin-bottom: 5px;">
+                        <img src="{{ public_path('storage/' . $restaurant->logo) }}" alt="Logo" style="max-height: 50px; margin-bottom: 5px;">
                     @endif
                     <div class="meta">
                         Date: {{ \Carbon\Carbon::parse($data->date)->format('d/m/Y') }}<br>

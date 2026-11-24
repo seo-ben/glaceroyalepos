@@ -47,14 +47,13 @@ class PaymentController extends Controller
 
             // Update customer name if provided during payment
             if ($request->customer_name) {
-                $order->update([
-                    'customer_name' => $request->customer_name,
-                    'customer_phone' => $request->customer_phone ?? $order->customer_phone
-                ]);
+                $order->customer_name = $request->customer_name;
+                $order->customer_phone = $request->customer_phone ?? $order->customer_phone;
             }
             if ($request->loyalty_token) {
-                $order->update(['loyalty_token' => $request->loyalty_token]);
+                $order->loyalty_token = trim($request->loyalty_token);
             }
+            $order->save();
 
             $payment = Payment::create([
                 'order_id'        => $order->id,
@@ -73,7 +72,8 @@ class PaymentController extends Controller
             \Illuminate\Support\Facades\Log::info("Payment Check Order #{$order->id}: Paid={$amountPaid}, Total={$order->total}");
             if ($amountPaid >= ($order->total - 1)) {
                 $order->update(['status' => 'paid', 'paid_at' => now(), 'cashier_id' => Auth::id()]);
-                \Illuminate\Support\Facades\Log::info("Order #{$order->id} marked as PAID");
+                $order->refresh();
+                \Illuminate\Support\Facades\Log::info("Order #{$order->id} marked as PAID (Loyalty Token: " . ($order->loyalty_token ?: 'None') . ")");
 
                 if ($order->table_id) {
                     \App\Models\Table::where('id', $order->table_id)->update([
@@ -90,8 +90,12 @@ class PaymentController extends Controller
 
                 ProcessStockDeduction::dispatch($order);
 
-                if ($order->loyalty_token) {
-                    \App\Jobs\ProcessLoyaltyWebhook::dispatch($order);
+                if (!empty($order->loyalty_token)) {
+                    try {
+                        \App\Jobs\ProcessLoyaltyWebhook::dispatchSync($order);
+                    } catch (\Throwable $e) {
+                        \Illuminate\Support\Facades\Log::error("Loyalty Webhook dispatchSync error for Order #{$order->id}: " . $e->getMessage());
+                    }
                 }
             }
 
@@ -143,9 +147,10 @@ class PaymentController extends Controller
                 $updateData['customer_name'] = $request->customer_name;
             }
             if ($request->loyalty_token) {
-                $updateData['loyalty_token'] = $request->loyalty_token;
+                $updateData['loyalty_token'] = trim($request->loyalty_token);
             }
             $order->update($updateData);
+            $order->refresh();
 
             if ($order->table_id) {
                 $order->table->update(['status' => 'free', 'occupied_since' => null, 'assigned_user_id' => null]);
@@ -153,8 +158,12 @@ class PaymentController extends Controller
 
             ProcessStockDeduction::dispatch($order);
 
-            if ($order->loyalty_token) {
-                \App\Jobs\ProcessLoyaltyWebhook::dispatch($order);
+            if (!empty($order->loyalty_token)) {
+                try {
+                    \App\Jobs\ProcessLoyaltyWebhook::dispatchSync($order);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::error("Loyalty Webhook dispatchSync error for Order #{$order->id}: " . $e->getMessage());
+                }
             }
 
             $order->logActivity('payment_split', "Paiement multiple : " . collect($request->payments)->map(fn($p) => "{$p['amount']} FCFA par {$p['method']}")->join(', '));

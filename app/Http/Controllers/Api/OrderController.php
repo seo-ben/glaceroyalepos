@@ -446,6 +446,7 @@ class OrderController extends Controller
             'items.*.id'       => 'required|exists:order_items,id',
             'items.*.quantity' => 'required|integer|min:0',
             'items.*.notes'    => 'nullable|string|max:300',
+            'admin_pin'        => 'nullable|string',
         ]);
 
         abort_if(
@@ -465,8 +466,24 @@ class OrderController extends Controller
                     $user = $request->user();
                     $user->loadMissing('role');
 
-                    if (!$user->isManager() && !$user->hasRole('cashier')) {
-                        abort(403, 'Permission refusée : Seul un Admin, Manager ou Caissier peut réduire un article déjà envoyé en cuisine.');
+                    if (!$user->isManager() && !$user->hasRole('admin')) {
+                        $adminPin = $request->input('admin_pin');
+                        if (!$adminPin) {
+                            abort(403, "Cet article est déjà en cuisine. L'autorisation du propriétaire (Code PIN Admin) est obligatoire pour décrémenter ou supprimer.");
+                        }
+
+                        $boss = User::where('restaurant_id', $user->restaurant_id)
+                            ->where('active', true)
+                            ->whereHas('role', fn($q) => $q->where('name', 'admin'))
+                            ->get()
+                            ->first(fn($u) => \Illuminate\Support\Facades\Hash::check($adminPin, $u->pin));
+
+                        abort_if(!$boss, 403, 'Code PIN Administrateur incorrect.');
+
+                        $order->logActivity(
+                            'item_reduction_authorized',
+                            "Réduction de {$item->product?->name} ({$item->quantity} -> {$data['quantity']}) autorisée par {$boss->full_name} via code PIN Admin"
+                        );
                     }
                 }
 

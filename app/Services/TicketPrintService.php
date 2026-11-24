@@ -27,24 +27,39 @@ class TicketPrintService
             ? "{$currencySymbol} " . number_format($amount, 0, '.', ' ')
             : number_format($amount, 0, '.', ' ') . " {$currencySymbol}";
 
-        $lines = $order->items->map(function ($item) use ($formatAmount) {
+        $groupedLines = [];
+        foreach ($order->items as $item) {
             $modifiers = $item->modifiers->map(fn($m) => [
-                'name' => $m->modifier->name, 
-                'extra_price' => $m->extra_price, 
-                'extra_fmt' => $m->extra_price > 0 ? '+' . number_format($m->extra_price, 0) : ''
-            ])->toArray();
+                'id' => $m->modifier_id,
+                'name' => $m->modifier?->name ?? 'Option',
+                'extra_price' => (float) $m->extra_price,
+                'extra_fmt' => (float) $m->extra_price > 0 ? '+' . number_format($m->extra_price, 0) : ''
+            ])->sortBy('id')->values()->toArray();
+
+            $modKey = collect($modifiers)->map(fn($m) => $m['id'] . ':' . $m['extra_price'])->implode('|');
+            $groupKey = ($item->product_id ?: 'custom_' . $item->notes) . '_' . (float)$item->unit_price . '_' . $modKey . '_' . ($item->is_takeaway ? '1' : '0');
+
             $lineTotal = ($item->unit_price * $item->quantity) + collect($modifiers)->sum('extra_price') * $item->quantity;
-            return [
-                'name' => $item->product?->name ?? $item->notes ?? 'ARTICLE LIBRE', 
-                'quantity' => $item->quantity, 
-                'unit_price' => $item->unit_price, 
-                'unit_fmt' => $formatAmount($item->unit_price), 
-                'total' => $lineTotal, 
-                'total_fmt' => $formatAmount($lineTotal), 
-                'notes' => $item->notes, 
-                'modifiers' => $modifiers
-            ];
-        })->toArray();
+
+            if (isset($groupedLines[$groupKey])) {
+                $groupedLines[$groupKey]['quantity'] += $item->quantity;
+                $groupedLines[$groupKey]['total'] += $lineTotal;
+                $groupedLines[$groupKey]['total_fmt'] = $formatAmount($groupedLines[$groupKey]['total']);
+            } else {
+                $groupedLines[$groupKey] = [
+                    'name' => $item->product?->name ?? $item->notes ?? 'ARTICLE LIBRE',
+                    'quantity' => $item->quantity,
+                    'unit_price' => $item->unit_price,
+                    'unit_fmt' => $formatAmount($item->unit_price),
+                    'total' => $lineTotal,
+                    'total_fmt' => $formatAmount($lineTotal),
+                    'notes' => $item->notes,
+                    'modifiers' => $modifiers,
+                    'is_takeaway' => (bool) $item->is_takeaway,
+                ];
+            }
+        }
+        $lines = array_values($groupedLines);
 
         $paymentLines = $order->payments->map(fn($p) => [
             'method' => $this->methodLabel($p->method), 
@@ -69,6 +84,10 @@ class TicketPrintService
         if ($order->discount_authorizer_name) {
             $discountLabel .= " (Par: {$order->discount_authorizer_name})";
         }
+
+        $totalTtc = (float) $order->total;
+        $vatAmount = (float) ($order->vat_amount ?? 0);
+        $amountHt = max(0, $totalTtc - $vatAmount);
 
         return [
             'restaurant' => [
@@ -99,16 +118,18 @@ class TicketPrintService
             ],
             'lines' => $lines,
             'totals' => [
+                'subtotal_ht' => $amountHt,
+                'subtotal_ht_fmt' => $formatAmount($amountHt),
                 'subtotal' => $displaySubtotal, 
                 'subtotal_fmt' => $formatAmount($displaySubtotal), 
                 'discount' => $displayDiscount, 
                 'discount_fmt' => $displayDiscount > 0 ? '-' . $formatAmount($displayDiscount) : null, 
                 'discount_reason' => $discountLabel, 
                 'vat_rate' => $config['default_vat_rate'] ?? 18, 
-                'vat_amount' => $order->vat_amount, 
-                'vat_fmt' => $formatAmount($order->vat_amount), 
-                'total' => $order->total, 
-                'total_fmt' => $formatAmount($order->total), 
+                'vat_amount' => $vatAmount, 
+                'vat_fmt' => $formatAmount($vatAmount), 
+                'total' => $totalTtc, 
+                'total_fmt' => $formatAmount($totalTtc), 
                 'amount_paid' => $order->amountPaid(), 
                 'amount_paid_fmt' => $formatAmount($order->amountPaid()), 
                 'change' => $order->payments->sum('change_given'), 
@@ -165,24 +186,36 @@ class TicketPrintService
             " . ($order->notes ? "<div style='border: 2px dashed #000; padding: 5px; text-align: center; font-size: 14px; font-weight: bold; margin: 5px 0;'>COMMENTAIRE: {$order->notes}</div>" : "") . "
 
             <table style='width: 100%; border-collapse: collapse;'>
-                " . $items->map(fn($item) => "
-                <tr style='border-bottom: 1px dashed #000;'>
-                    <td style='padding: 6px 0;'>
-                        <div style='display: flex; justify-content: space-between; align-items: baseline;'>
-                            <span style='font-size: 14px; font-weight: bold;'>
-                                " . strtoupper($item->product?->name ?? $item->notes ?? 'ARTICLE LIBRE') . "
-                                " . ($item->is_takeaway ? "<span style='color: #000; background: #eee; padding: 0 4px; margin-left: 5px; border: 1px solid #000;'>[A EMPORTER]</span>" : "") . "
-                            </span>
-                            <span style='flex-grow: 1; border-bottom: 1px dotted #aaa; margin: 0 5px; height: 10px;'></span>
-                            <span style='font-size: 16px; font-weight: 900;'>{$item->quantity}</span>
-                        </div>
-                        " . ($item->modifiers && $item->modifiers->count() > 0 ? "
-                            <div style='font-size: 11px; font-weight: bold; margin-left: 10px; color: #333;'>
-                                " . $item->modifiers->map(fn($m) => "• " . strtoupper($m->modifier?->name ?? 'OPTION'))->implode('<br>') . "
-                            </div>" : "") . "
-                        " . ($item->notes ? "<div style='font-size: 10px; font-weight: bold; font-style: italic; color: #666; margin-top: 2px;'>* {$item->notes}</div>" : "") . "
-                    </td>
-                </tr>")->implode('') . "
+                " . $items->groupBy(function($item) {
+                    $modKey = $item->modifiers->pluck('modifier_id')->sort()->implode('-');
+                    return ($item->product_id ?: 'custom_' . $item->notes) . '_' . ($item->notes ?? '') . '_' . $modKey . '_' . ($item->is_takeaway ? '1' : '0');
+                })->map(function($grouped) {
+                    $first = $grouped->first();
+                    $totalQty = $grouped->sum('quantity');
+                    $modHtml = ($first->modifiers && $first->modifiers->count() > 0)
+                        ? "<div style='font-size: 11px; font-weight: bold; margin-left: 10px; color: #333;'>" . 
+                            $first->modifiers->map(fn($m) => "• " . strtoupper($m->modifier?->name ?? 'OPTION'))->implode('<br>') . 
+                          "</div>"
+                        : "";
+                    $notesHtml = $first->notes ? "<div style='font-size: 10px; font-weight: bold; font-style: italic; color: #666; margin-top: 2px;'>* {$first->notes}</div>" : "";
+                    $takeawayHtml = $first->is_takeaway ? "<span style='color: #000; background: #eee; padding: 0 4px; margin-left: 5px; border: 1px solid #000;'>[A EMPORTER]</span>" : "";
+
+                    return "
+                    <tr style='border-bottom: 1px dashed #000;'>
+                        <td style='padding: 6px 0;'>
+                            <div style='display: flex; justify-content: space-between; align-items: baseline;'>
+                                <span style='font-size: 14px; font-weight: bold;'>
+                                    " . strtoupper($first->product?->name ?? $first->notes ?? 'ARTICLE LIBRE') . "
+                                    {$takeawayHtml}
+                                </span>
+                                <span style='flex-grow: 1; border-bottom: 1px dotted #aaa; margin: 0 5px; height: 10px;'></span>
+                                <span style='font-size: 16px; font-weight: 900;'>{$totalQty}</span>
+                            </div>
+                            {$modHtml}
+                            {$notesHtml}
+                        </td>
+                    </tr>";
+                })->implode('') . "
             </table>
             <div style='margin-top: 5px; text-align: center; font-size: 10px; font-weight: bold;'>*** FIN ***</div>
         </div>";
@@ -290,7 +323,7 @@ class TicketPrintService
         
         if ($qrBase64) {
             $html .= "<div style='text-align: center; margin-top: 5px;'>
-                <img src='{$qrBase64}' style='width: 40px; height: 40px; filter: grayscale(100%); display: inline-block;'>
+                <img src='{$qrBase64}' alt='QR Code' style='width: 40px; height: 40px; filter: grayscale(100%); display: inline-block;'>
             </div>";
         }
 
@@ -364,7 +397,7 @@ class TicketPrintService
                 <div style='font-weight: bold; margin-bottom: 5px;'>Merci de votre confiance !</div>";
         
         if ($qrBase64) {
-            $html .= "<div style='text-align: center; margin-top: 8px;'><img src='{$qrBase64}' style='width: 60px; height: 60px; display: inline-block; filter: grayscale(100%);'></div>";
+            $html .= "<div style='text-align: center; margin-top: 8px;'><img src='{$qrBase64}' alt='QR Code' style='width: 60px; height: 60px; display: inline-block; filter: grayscale(100%);'></div>";
         }
 
         $html .= "
@@ -391,7 +424,7 @@ class TicketPrintService
         $logoHtml = '';
         if (file_exists($logoPath)) {
             $logoData = base64_encode(file_get_contents($logoPath));
-            $logoHtml = "<img src='data:image/png;base64,{$logoData}' style='max-height: 60px; margin-bottom: 10px;' /><br>";
+            $logoHtml = "<img src='data:image/png;base64,{$logoData}' alt='Logo' style='max-height: 60px; margin-bottom: 10px;' /><br>";
         }
 
         $html = "
@@ -449,12 +482,16 @@ class TicketPrintService
                     </tr>";
         }
 
+        $totalTtc = (float)($order->total ?? 0);
+        $vatAmount = (float)($order->vat_amount ?? 0);
+        $amountHt = max(0, $totalTtc - $vatAmount);
+
         $html .= "
                 </tbody>
                 <tfoot>
                     <tr>
-                        <td colspan='3' style='padding: 4px 8px; text-align: right; border: 1px solid #000;'><strong>SOUS-TOTAL (TTC)</strong></td>
-                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format((float)$order->subtotal, 0, ',', ' ') . "</td>
+                        <td colspan='3' style='padding: 4px 8px; text-align: right; border: 1px solid #000;'><strong>MONTANT TOTAL HT</strong></td>
+                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format($amountHt, 0, ',', ' ') . "</td>
                     </tr>
                     " . (($order->discount_amount > 0 && $order->type !== 'gozem') ? "
                     <tr>
@@ -465,12 +502,12 @@ class TicketPrintService
                         <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>- " . number_format((float)$order->discount_amount, 0, ',', ' ') . "</td>
                     </tr>" : "") . "
                     <tr>
-                        <td colspan='3' style='padding: 4px 8px; text-align: right; border: 1px solid #000;'><strong>TVA (18%)</strong></td>
-                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format((float)($order->vat_amount ?? 0), 0, ',', ' ') . "</td>
+                        <td colspan='3' style='padding: 4px 8px; text-align: right; border: 1px solid #000;'><strong>TVA COLLECTÉE (18%)</strong></td>
+                        <td style='padding: 4px 8px; text-align: right; border: 1px solid #000;'>" . number_format($vatAmount, 0, ',', ' ') . "</td>
                     </tr>
                     <tr style='background: #f0f0f0;'>
-                        <td colspan='3' style='padding: 6px 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>TOTAL NET (TTC)</strong></td>
-                        <td style='padding: 6px 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>" . number_format((float)($order->total ?? 0), 0, ',', ' ') . " FCFA</strong></td>
+                        <td colspan='3' style='padding: 6px 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>TOTAL NET TTC</strong></td>
+                        <td style='padding: 6px 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>" . number_format($totalTtc, 0, ',', ' ') . " FCFA</strong></td>
                     </tr>
                 </tfoot>
             </table>
@@ -512,7 +549,19 @@ class TicketPrintService
     public function generateInvoiceA4Pdf(Order $order): string
     {
         $content = $this->invoiceA4Html($order);
-        $html = "<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/><style>body { font-family: 'DejaVu Sans', sans-serif; color: #000; margin: 0; padding: 20px; } .wrapper { width: 180mm; margin: 0 auto; }</style></head><body><div class='wrapper'>{$content}</div></body></html>";
+        $html = "
+        <html>
+        <head>
+        <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>
+        <style>body { font-family: 'DejaVu Sans', sans-serif; color: #000; margin: 0; padding: 20px; } .wrapper { width: 180mm; margin: 0 auto; }
+        </style>
+        </head>
+        <body>
+            <div class='wrapper'>
+                {$content}
+            </div>
+        </body>
+        </html>";
         return Pdf::loadHTML($html)->setPaper('a4')->output();
     }
 
@@ -527,16 +576,27 @@ class TicketPrintService
     }
 
     /**
-     * Génère le HTML A4 professionnel pour une commande de gâteau
+     * Génère le HTML A4 professionnel pour une commande de gâteau (Bon de commande si acompte, Facture Normalisée si solde régle)
      */
-    public function cakeOrderA4Html(\App\Models\CakeOrder $cakeOrder): string
+    public function cakeOrderA4Html(\App\Models\CakeOrder $cakeOrder, bool $forceInvoice = false): string
     {
         $restaurant = $cakeOrder->restaurant;
-        $total = number_format((float)$cakeOrder->total, 0, ',', ' ');
-        $advance = number_format((float)$cakeOrder->advance_paid, 0, ',', ' ');
-        $remaining = number_format((float)$cakeOrder->remaining_amount, 0, ',', ' ');
+        $totalVal = (float)$cakeOrder->total;
+        $advanceVal = (float)$cakeOrder->advance_paid;
+        $remainingVal = (float)$cakeOrder->remaining_amount;
+
+        $isPaid = $cakeOrder->is_paid || $remainingVal <= 0 || $forceInvoice;
+
+        $total = number_format($totalVal, 0, ',', ' ');
+        $advance = number_format($advanceVal, 0, ',', ' ');
+        $remaining = number_format($remainingVal, 0, ',', ' ');
+        $vatVal = round($totalVal * 0.18 / 1.18);
+        $amountHt = max(0, $totalVal - $vatVal);
+        $amountHtFmt = number_format($amountHt, 0, ',', ' ');
+        $vat = number_format($vatVal, 0, ',', ' ');
         $date = \Carbon\Carbon::parse($cakeOrder->delivery_date)->locale('fr')->isoFormat('LL');
         $time = $cakeOrder->delivery_time ? substr($cakeOrder->delivery_time, 0, 5) : 'N/A';
+        $ifu = $restaurant->vat_number ?? '1001580865';
 
         $qrPath = public_path('img/website_qr.png');
         $qrBase64 = null;
@@ -545,6 +605,109 @@ class TicketPrintService
             $qrBase64 = 'data:image/png;base64,' . $qrData;
         }
 
+        $logoPath = public_path('img/logo.png');
+        $logoHtml = '';
+        if (file_exists($logoPath)) {
+            $logoData = base64_encode(file_get_contents($logoPath));
+            $logoHtml = "<img src='data:image/png;base64,{$logoData}' alt='Logo' style='max-height: 50px; margin-bottom: 5px;' /><br>";
+        }
+
+        // --- SI LA COMMANDE EST PAYÉE : GENERER FACTURE A4 ---
+        if ($isPaid) {
+            $paidDate = $cakeOrder->paid_at ? \Carbon\Carbon::parse($cakeOrder->paid_at)->format('d/m/Y à H:i') : date('d/m/Y à H:i');
+            $paymentMethodLabel = strtoupper($cakeOrder->payment_method ?? 'ESPÈCES');
+
+            return "
+            <div style='font-family: \"DejaVu Sans\", sans-serif; background: #fff; color: #000; padding: 20px 30px; min-height: 260mm; line-height: 1.2; border: 1px solid #000;'>
+                <!-- EN-TÊTE -->
+                <table style='width: 100%; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 15px;'>
+                    <tr>
+                        <td style='vertical-align: top; width: 60%;'>
+                            {$logoHtml}
+                            <div style='font-size: 18px; font-weight: bold; text-transform: uppercase; margin-bottom: 2px;'>{$restaurant->name}</div>
+                            <div style='font-size: 11px; margin-top: 2px;'>{$restaurant->address}</div>
+                            <div style='font-size: 11px;'>Tél : {$restaurant->phone}</div>
+                            <div style='font-size: 11px; font-weight: bold; margin-top: 2px;'>IFU : {$ifu}</div>
+                        </td>
+                        <td style='text-align: right; vertical-align: top;'>
+                            <div style='border: 2px solid #000; padding: 6px 14px; font-weight: bold; font-size: 14px; display: inline-block; background: #f0f0f0; margin-bottom: 8px;'>FACTURE</div>
+                            <div style='font-size: 12px; font-weight: bold;'>N° FACTURE : {$cakeOrder->order_number}</div>
+                            <div style='font-size: 11px; margin-top: 2px;'>Payée le : {$paidDate}</div>
+                            <div style='font-size: 11px;'>Livraison prévue : {$date} à {$time}</div>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- CLIENT -->
+                <div style='margin-bottom: 15px; font-size: 12px; border: 1px solid #000; padding: 10px;'>
+                    <strong style='font-size: 10px; text-transform: uppercase;'>DOIT À (CLIENT) :</strong><br>
+                    <span style='font-size: 14px; font-weight: bold;'>" . strtoupper($cakeOrder->customer_name) . "</span>" . ($cakeOrder->customer_phone ? " — Tél : {$cakeOrder->customer_phone}" : '') . "
+                </div>
+
+                <!-- TABLEAU DES ARTICLES -->
+                <table style='width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 12px;'>
+                    <thead>
+                        <tr style='background: #f0f0f0;'>
+                            <th style='padding: 8px; text-align: left; border: 1px solid #000; text-transform: uppercase;'>DÉSIGNATION</th>
+                            <th style='padding: 8px; text-align: center; border: 1px solid #000; width: 70px; text-transform: uppercase;'>QTÉ</th>
+                            <th style='padding: 8px; text-align: right; border: 1px solid #000; width: 110px; text-transform: uppercase;'>P.U</th>
+                            <th style='padding: 8px; text-align: right; border: 1px solid #000; width: 120px; text-transform: uppercase;'>TOTAL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style='padding: 10px 8px; border: 1px solid #000; font-weight: bold;'>
+                                GÂTEAU PERSONNALISÉ
+                                " . ($cakeOrder->notes ? "<div style='font-size: 10px; font-weight: normal; font-style: italic; margin-top: 4px; color: #333;'>Personnalisation : " . nl2br($cakeOrder->notes) . "</div>" : "") . "
+                            </td>
+                            <td style='padding: 10px 8px; text-align: center; border: 1px solid #000;'>1</td>
+                            <td style='padding: 10px 8px; text-align: right; border: 1px solid #000;'>{$total}</td>
+                            <td style='padding: 10px 8px; text-align: right; border: 1px solid #000; font-weight: bold;'>{$total}</td>
+                        </tr>
+                    </tbody>
+                    <tfoot>
+                        <tr>
+                            <td colspan='3' style='padding: 6px 8px; text-align: right; border: 1px solid #000;'><strong>MONTANT TOTAL HT</strong></td>
+                            <td style='padding: 6px 8px; text-align: right; border: 1px solid #000;'>{$amountHtFmt} FCFA</td>
+                        </tr>
+                        <tr>
+                            <td colspan='3' style='padding: 6px 8px; text-align: right; border: 1px solid #000;'><strong>TVA (18%)</strong></td>
+                            <td style='padding: 6px 8px; text-align: right; border: 1px solid #000;'>{$vat} FCFA</td>
+                        </tr>
+                        <tr style='background: #f0f0f0;'>
+                            <td colspan='3' style='padding: 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>TOTAL NET TTC</strong></td>
+                            <td style='padding: 8px; text-align: right; border: 2px solid #000; font-size: 14px;'><strong>{$total} FCFA</strong></td>
+                        </tr>
+                    </tfoot>
+                </table>
+                </table>
+
+                <!-- RÈGLEMENT & PAIEMENT -->
+                <div style='margin-bottom: 20px; font-size: 12px; padding: 10px 12px; border: 1px dashed #000; background: #fafafa;'>
+                    <strong>MODE DE PAIEMENT :</strong> {$paymentMethodLabel}<br>
+                    <strong>STATUT DU PAIEMENT :</strong> INTEGRALEMENT PAYÉ (Reste à payer : 0 FCFA)
+                </div>
+
+                <!-- SIGNATURES & PIED DE PAGE -->
+                <div style='margin-top: 40px; width: 100%;'>
+                    <table style='width: 100%;'>
+                        <tr>
+                            <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 9px; font-weight: bold;'>Signature Client</td>
+                            <td style='width: 20%; text-align: center;'>
+                                " . ($qrBase64 ? "<img src='{$qrBase64}' alt='QR Code' style='width: 60px; height: 60px; filter: grayscale(100%);'>" : "") . "
+                            </td>
+                            <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 9px; font-weight: bold;'>Cachet & Direction</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <div style='margin-top: 30px; text-align: center; font-size: 8px; font-weight: bold; border-top: 1px solid #000; padding-top: 8px;'>
+                    Facture certifiée par Omega POS • Émise le " . now()->format('d/m/Y H:i') . "
+                </div>
+            </div>";
+        }
+
+        // --- SI NON PAYÉ / ACOMPTE : BON DE COMMANDE ---
         return "
         <div style='font-family: \"DejaVu Sans\", sans-serif; color: #000; padding: 15px; border: 1px solid #000; position: relative;'>
             <table style='width: 100%; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 10px;'>
@@ -553,7 +716,8 @@ class TicketPrintService
                         <div style='font-size: 18px; font-weight: bold; text-transform: uppercase;'>{$restaurant->name}</div>
                         <div style='font-size: 9px; font-weight: bold; margin-top: 2px;'>
                             {$restaurant->address}<br>
-                            Tél: {$restaurant->phone}
+                            Tél: {$restaurant->phone}<br>
+                            IFU: {$ifu}
                         </div>
                     </td>
                     <td style='text-align: right; vertical-align: top;'>
@@ -563,7 +727,7 @@ class TicketPrintService
             </table>
 
             <div style='font-size: 14px; font-weight: bold; margin-bottom: 2px;'>CONFIRMATION DE COMMANDE GÂTEAU</div>
-            <div style='font-size: 10px; font-weight: bold; margin-bottom: 15px;'>Réf: #{$cakeOrder->order_number} | Emis le " . date('d/m/Y à H:i') . "</div>
+            <div style='font-size: 10px; font-weight: bold; margin-bottom: 15px;'>Réf: {$cakeOrder->order_number} | Emis le " . date('d/m/Y à H:i') . "</div>
 
             <table style='width: 100%; border-collapse: collapse; margin-bottom: 15px;'>
                 <tr>
@@ -623,7 +787,7 @@ class TicketPrintService
                     <tr>
                         <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 8px; font-weight: bold;'>Signature Client</td>
                         <td style='width: 20%; text-align: center;'>
-                            " . ($qrBase64 ? "<img src='{$qrBase64}' style='width: 50px; height: 50px; filter: grayscale(100%);'>" : "") . "
+                            " . ($qrBase64 ? "<img src='{$qrBase64}' alt='QR Code' style='width: 50px; height: 50px; filter: grayscale(100%);'>" : "") . "
                         </td>
                         <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 8px; font-weight: bold;'>Cachet Établissement</td>
                     </tr>
@@ -864,7 +1028,7 @@ class TicketPrintService
 
             <div style='margin-top: 20px; text-align: center;'>
                 <p style='font-size: 11px; margin-bottom: 10px;'>Veuillez solder votre ardoise dans les plus brefs délais. Merci !</p>
-                " . ($qrBase64 ? "<img src='{$qrBase64}' style='width: 70px; height: 70px; filter: grayscale(100%);'>" : "") . "
+                " . ($qrBase64 ? "<img src='{$qrBase64}' alt='QR Code' style='width: 70px; height: 70px; filter: grayscale(100%);'>" : "") . "
                 <p style='font-size: 8px; font-weight: bold; margin-top: 5px;'>Généré le " . now()->format('d/m/Y H:i') . "</p>
             </div>
         </div>";

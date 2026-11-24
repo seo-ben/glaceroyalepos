@@ -75,13 +75,22 @@
                             </tr>
                         </thead>
                         <tbody>
-                            @foreach($order->items->whereNotIn('status', ['cancelled']) as $index => $item)
+                            @php
+                                $groupedItems = $order->items->whereNotIn('status', ['cancelled'])->groupBy(fn($i) => ($i->product_id ?: 'c_' . $i->notes) . '_' . (float)$i->unit_price);
+                                $counter = 1;
+                            @endphp
+                            @foreach($groupedItems as $group)
+                                @php
+                                    $firstItem = $group->first();
+                                    $totalGroupQty = $group->sum('quantity');
+                                    $itemSubtotal = $totalGroupQty * $firstItem->unit_price;
+                                @endphp
                                 <tr>
-                                    <td>{{ $index + 1 }}</td>
-                                    <td>{{ $item->product->name }}</td>
-                                    <td style="text-align: center;">{{ $item->quantity }}</td>
-                                    <td style="text-align: right;">{{ number_format($item->unit_price, 0, ',', ' ') }}</td>
-                                    <td style="text-align: right;">{{ number_format($item->quantity * $item->unit_price, 0, ',', ' ') }}</td>
+                                    <td>{{ $counter++ }}</td>
+                                    <td>{{ $firstItem->product?->name ?? $firstItem->notes ?? 'Article' }}</td>
+                                    <td style="text-align: center;">{{ $totalGroupQty }}</td>
+                                    <td style="text-align: right;">{{ number_format($firstItem->unit_price, 0, ',', ' ') }}</td>
+                                    <td style="text-align: right;">{{ number_format($itemSubtotal, 0, ',', ' ') }}</td>
                                 </tr>
                             @endforeach
                         </tbody>
@@ -89,9 +98,14 @@
 
                     <div class="totals-wrapper">
                         <table class="totals-table">
+                            @php
+                                $totalTtc = (float) $order->total;
+                                $vatVal = (float) $order->vat_amount;
+                                $amountHt = max(0, $totalTtc - $vatVal);
+                            @endphp
                             <tr>
-                                <td>Sous-total (TTC)</td>
-                                <td style="text-align: right;">{{ number_format($order->subtotal, 0, ',', ' ') }} FCFA</td>
+                                <td>MONTANT TOTAL HT</td>
+                                <td style="text-align: right;">{{ number_format($amountHt, 0, ',', ' ') }} FCFA</td>
                             </tr>
                             @if($order->discount_amount > 0)
                                 <tr>
@@ -101,11 +115,11 @@
                             @endif
                             <tr>
                                 <td>TVA ({{ $vatRate }}%)</td>
-                                <td style="text-align: right;">{{ number_format($order->vat_amount, 0, ',', ' ') }} FCFA</td>
+                                <td style="text-align: right;">{{ number_format($vatVal, 0, ',', ' ') }} FCFA</td>
                             </tr>
                             <tr class="total-row">
-                                <td>TOTAL NET (TTC)</td>
-                                <td style="text-align: right;">{{ number_format($order->total, 0, ',', ' ') }} FCFA</td>
+                                <td>TOTAL NET TTC</td>
+                                <td style="text-align: right;">{{ number_format($totalTtc, 0, ',', ' ') }} FCFA</td>
                             </tr>
                         </table>
                         <div class="clear"></div>
