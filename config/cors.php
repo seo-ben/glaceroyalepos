@@ -19,9 +19,17 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => explode(',', env('FRONTEND_URL', 'https://omegapos.netlify.app,http://localhost:5173,http://127.0.0.1:5173')),
+    'allowed_origins' => array_values(array_unique(array_filter(array_map('trim', array_merge(
+        explode(',', env('FRONTEND_URL', 'https://glaceroyalpos.net,https://www.glaceroyalpos.net,https://omegapos.netlify.app,http://localhost:5173,http://127.0.0.1:5173')),
+        [
+            'https://glaceroyalpos.net',
+            'https://www.glaceroyalpos.net',
+        ]
+    ))))),
 
-    'allowed_origins_patterns' => [],
+    'allowed_origins_patterns' => [
+        '/^https:\/\/([a-z0-9-]+\.)?glaceroyalpos\.net$/',
+    ],
 
     'allowed_headers' => ['*'],
 
