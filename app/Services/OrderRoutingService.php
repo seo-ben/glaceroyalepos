@@ -49,8 +49,13 @@ class OrderRoutingService
         }
 
         $dest = strtolower($category->destination);
+
+        // Anciennes catégories pizza redirigées vers cuisine
+        if ($dest === 'pizza') {
+            return 'kitchen';
+        }
         
-        return in_array($dest, ['kitchen', 'bar', 'pizza', 'cakes'])
+        return in_array($dest, ['kitchen', 'bar', 'cakes'])
             ? $dest
             : 'kitchen';
     }
@@ -62,9 +67,8 @@ class OrderRoutingService
     {
         return match(strtolower($destination)) {
             'kitchen' => 'CUISINE',
-            'bar'     => 'BAR',
-            'pizza'   => 'PIZZA',
-            'cakes'   => 'PATISSERIE',
+            'bar'     => 'GLACES',
+            'cakes'   => 'DIVERS',
             'all'     => 'GLOBAL (TOUT)',
             default   => 'PRODUCTION',
         };
@@ -77,9 +81,8 @@ class OrderRoutingService
     {
         return match($destination) {
             'kitchen' => '🍳',
-            'bar'     => '🍺',
-            'pizza'   => '🍕',
-            'cakes'   => '🍰',
+            'bar'     => '🍦',
+            'cakes'   => '📦',
             default   => '🍳',
         };
     }

@@ -145,21 +145,6 @@
 
   <div class="center">
     <div class="footer-msg">{{ $receipt['footer']['message'] }}</div>
-    @php
-      $qrPath = public_path('img/website_qr.png');
-      $qrBase64 = null;
-      if (file_exists($qrPath)) {
-          $qrData = base64_encode(file_get_contents($qrPath));
-          $qrBase64 = 'data:image/png;base64,' . $qrData;
-      }
-    @endphp
-
-    @if($qrBase64)
-    <div style="margin-top: 8px; text-align: center;">
-      <img src="{{ $qrBase64 }}" alt="QR Code" style="width: 60px; height: 60px; filter: grayscale(100%); display: inline-block;">
-    </div>
-    @endif
-
     <div style="font-size:8px; margin-top:2px; font-weight: bold;">{{ now()->format('d/m/Y H:i') }}</div>
   </div>
 </div>

@@ -309,23 +309,10 @@ class TicketPrintService
         
         $cakeVal = $session->cake_orders_total ?? 0;
         if ($cakeVal > 0) {
-            $html .= "<tr style='border-top: 1px dotted #000;'><td>DONT GATEAU:</td><td style='text-align: right;'>" . number_format($cakeVal, 0, ',', ' ') . "</td></tr>";
+            $html .= "<tr style='border-top: 1px dotted #000;'><td>DONT DIVERS:</td><td style='text-align: right;'>" . number_format($cakeVal, 0, ',', ' ') . "</td></tr>";
         }
         
-        $qrPath = public_path('img/website_qr.png');
-        $qrBase64 = null;
-        if (file_exists($qrPath)) {
-            $qrData = base64_encode(file_get_contents($qrPath));
-            $qrBase64 = 'data:image/png;base64,' . $qrData;
-        }
-
         $html .= "</table>";
-        
-        if ($qrBase64) {
-            $html .= "<div style='text-align: center; margin-top: 5px;'>
-                <img src='{$qrBase64}' alt='QR Code' style='width: 40px; height: 40px; filter: grayscale(100%); display: inline-block;'>
-            </div>";
-        }
 
         $html .= "<div style='margin-top: 5px; border-top: 1px dashed #000; text-align: center; font-weight: bold; font-size: 8px;'>
                 VISA RESPONSABLE • " . now()->format('d/m/y H:i') . "
@@ -344,20 +331,12 @@ class TicketPrintService
         $deliveryDate = \Carbon\Carbon::parse($cakeOrder->delivery_date)->format('d/m/y');
         $deliveryTime = $cakeOrder->delivery_time ? " " . substr($cakeOrder->delivery_time, 0, 5) : '';
 
-        // QR Code Base64
-        $qrPath = public_path('img/website_qr.png');
-        $qrBase64 = null;
-        if (file_exists($qrPath)) {
-            $qrData = base64_encode(file_get_contents($qrPath));
-            $qrBase64 = 'data:image/png;base64,' . $qrData;
-        }
-
         $html = "
         <div style='font-family: \"DejaVu Sans\", sans-serif; width: 100%; font-size: 10px; color: #000; line-height: 1.1; background: #fff;'>
             <div style='text-align: center;'>
                 <div style='font-size: 13px; font-weight: bold;'>" . strtoupper($restaurant->name) . "</div>
                 <div style='font-weight: bold; border-top: 1px dashed #000; border-bottom: 1px dashed #000; margin: 3px 0; padding: 2px 0;'>
-                    GATEAU #{$cakeOrder->order_number}
+                    DIVERS #{$cakeOrder->order_number}
                 </div>
             </div>
             
@@ -394,13 +373,7 @@ class TicketPrintService
             </div>
 
             <div style='text-align: center; margin-top: 15px;'>
-                <div style='font-weight: bold; margin-bottom: 5px;'>Merci de votre confiance !</div>";
-        
-        if ($qrBase64) {
-            $html .= "<div style='text-align: center; margin-top: 8px;'><img src='{$qrBase64}' alt='QR Code' style='width: 60px; height: 60px; display: inline-block; filter: grayscale(100%);'></div>";
-        }
-
-        $html .= "
+                <div style='font-weight: bold; margin-bottom: 5px;'>Merci de votre confiance !</div>
                 <div style='font-size: 9px; margin-top: 5px; font-weight: bold;'>" . now()->format('d/m/Y H:i') . "</div>
             </div>
         </div>";
@@ -598,13 +571,6 @@ class TicketPrintService
         $time = $cakeOrder->delivery_time ? substr($cakeOrder->delivery_time, 0, 5) : 'N/A';
         $ifu = $restaurant->vat_number ?? '1001580865';
 
-        $qrPath = public_path('img/website_qr.png');
-        $qrBase64 = null;
-        if (file_exists($qrPath)) {
-            $qrData = base64_encode(file_get_contents($qrPath));
-            $qrBase64 = 'data:image/png;base64,' . $qrData;
-        }
-
         $logoPath = public_path('img/logo.png');
         $logoHtml = '';
         if (file_exists($logoPath)) {
@@ -657,7 +623,7 @@ class TicketPrintService
                     <tbody>
                         <tr>
                             <td style='padding: 10px 8px; border: 1px solid #000; font-weight: bold;'>
-                                GÂTEAU PERSONNALISÉ
+                                COMMANDE DIVERS
                                 " . ($cakeOrder->notes ? "<div style='font-size: 10px; font-weight: normal; font-style: italic; margin-top: 4px; color: #333;'>Personnalisation : " . nl2br($cakeOrder->notes) . "</div>" : "") . "
                             </td>
                             <td style='padding: 10px 8px; text-align: center; border: 1px solid #000;'>1</td>
@@ -693,9 +659,7 @@ class TicketPrintService
                     <table style='width: 100%;'>
                         <tr>
                             <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 9px; font-weight: bold;'>Signature Client</td>
-                            <td style='width: 20%; text-align: center;'>
-                                " . ($qrBase64 ? "<img src='{$qrBase64}' alt='QR Code' style='width: 60px; height: 60px; filter: grayscale(100%);'>" : "") . "
-                            </td>
+                            <td style='width: 20%; text-align: center;'></td>
                             <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 9px; font-weight: bold;'>Cachet & Direction</td>
                         </tr>
                     </table>
@@ -726,7 +690,7 @@ class TicketPrintService
                 </tr>
             </table>
 
-            <div style='font-size: 14px; font-weight: bold; margin-bottom: 2px;'>CONFIRMATION DE COMMANDE GÂTEAU</div>
+            <div style='font-size: 14px; font-weight: bold; margin-bottom: 2px;'>CONFIRMATION DE COMMANDE DIVERS</div>
             <div style='font-size: 10px; font-weight: bold; margin-bottom: 15px;'>Réf: {$cakeOrder->order_number} | Emis le " . date('d/m/Y à H:i') . "</div>
 
             <table style='width: 100%; border-collapse: collapse; margin-bottom: 15px;'>
@@ -755,7 +719,7 @@ class TicketPrintService
                 </thead>
                 <tbody>
                     <tr>
-                        <td style='padding: 8px 6px; border-bottom: 1px solid #000; font-size: 11px; font-weight: bold;'>Gâteau Personnalisé</td>
+                        <td style='padding: 8px 6px; border-bottom: 1px solid #000; font-size: 11px; font-weight: bold;'>Commande Divers</td>
                         <td style='padding: 8px 6px; border-bottom: 1px solid #000; font-size: 11px; text-align: center;'>1</td>
                         <td style='padding: 8px 6px; border-bottom: 1px solid #000; font-size: 11px; text-align: right; font-weight: bold;'>{$total} FCFA</td>
                     </tr>
@@ -786,9 +750,7 @@ class TicketPrintService
                 <table style='width: 100%;'>
                     <tr>
                         <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 8px; font-weight: bold;'>Signature Client</td>
-                        <td style='width: 20%; text-align: center;'>
-                            " . ($qrBase64 ? "<img src='{$qrBase64}' alt='QR Code' style='width: 50px; height: 50px; filter: grayscale(100%);'>" : "") . "
-                        </td>
+                        <td style='width: 20%; text-align: center;'></td>
                         <td style='width: 40%; border-top: 1px dashed #000; padding-top: 5px; text-align: center; font-size: 8px; font-weight: bold;'>Cachet Établissement</td>
                     </tr>
                 </table>
@@ -949,13 +911,6 @@ class TicketPrintService
         $date = now()->format('d/m/Y');
         $tab->load('orders.items.product');
 
-        $qrPath = public_path('img/website_qr.png');
-        $qrBase64 = null;
-        if (file_exists($qrPath)) {
-            $qrData = base64_encode(file_get_contents($qrPath));
-            $qrBase64 = 'data:image/png;base64,' . $qrData;
-        }
-
         $html = "
         <div style='padding: 15px; border: 1px solid #000; font-family: Arial, sans-serif; background: #fff; color: #000;'>
             <table style='width: 100%; border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 10px;'>
@@ -1028,7 +983,6 @@ class TicketPrintService
 
             <div style='margin-top: 20px; text-align: center;'>
                 <p style='font-size: 11px; margin-bottom: 10px;'>Veuillez solder votre ardoise dans les plus brefs délais. Merci !</p>
-                " . ($qrBase64 ? "<img src='{$qrBase64}' alt='QR Code' style='width: 70px; height: 70px; filter: grayscale(100%);'>" : "") . "
                 <p style='font-size: 8px; font-weight: bold; margin-top: 5px;'>Généré le " . now()->format('d/m/Y H:i') . "</p>
             </div>
         </div>";
