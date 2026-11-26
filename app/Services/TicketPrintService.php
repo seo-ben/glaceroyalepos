@@ -179,7 +179,7 @@ class TicketPrintService
             <div style='text-align: center; font-size: 11px;'>{$order->order_number} | {$date}</div>
             <div style='text-align: center; font-size: 12px; font-weight: bold; margin-top: 2px;'>SERVEUR: " . strtoupper($order->server_name ?: $order->waiter?->full_name ?: 'N/A') . "</div>
 
-            <div style='border: 2px solid #000; text-align: center; font-size: 24px; font-weight: bold; margin: 3px 0;'>
+            <div class='boxed' style='border: 2px solid #000; text-align: center; font-size: 24px; font-weight: bold; margin: 3px 0;'>
                 {$tableLabel}
             </div>
 
@@ -201,9 +201,9 @@ class TicketPrintService
                     $takeawayHtml = $first->is_takeaway ? "<span style='color: #000; background: #eee; padding: 0 4px; margin-left: 5px; border: 1px solid #000;'>[A EMPORTER]</span>" : "";
 
                     return "
-                    <tr style='border-bottom: 1px dashed #000;'>
+                    <tr class='kitem-tr' style='border-bottom: 1px dashed #000;'>
                         <td style='padding: 6px 0;'>
-                            <div style='display: flex; justify-content: space-between; align-items: baseline;'>
+                            <div class='kitem' style='display: flex; justify-content: space-between; align-items: baseline;'>
                                 <span style='font-size: 14px; font-weight: bold;'>
                                     " . strtoupper($first->product?->name ?? $first->notes ?? 'ARTICLE LIBRE') . "
                                     {$takeawayHtml}
