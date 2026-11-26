@@ -7,6 +7,7 @@ use App\Models\Cancellation;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\Payment;
+use App\Models\Table;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -141,7 +142,13 @@ class CancellationController extends Controller
     {
         $order->items()->update(['status' => 'cancelled']);
         $order->update(['status' => 'cancelled']);
-        if ($order->table_id) $order->table->update(['status' => \App\Models\Table::freeStatus(), 'occupied_since' => null, 'assigned_user_id' => null]);
+        if ($order->table_id) {
+            Table::where('id', $order->table_id)->update([
+                'status'           => Table::freeStatus(),
+                'occupied_since'   => null,
+                'assigned_user_id' => null,
+            ]);
+        }
         $order->logActivity('cancelled', "Commande annulée. Raison: {$cancellation->reason}", ['cancellation_id' => $cancellation->id], $cancellation->approved_by);
     }
 
