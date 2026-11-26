@@ -13,15 +13,42 @@ use Carbon\Carbon;
 
 class ReportController extends Controller
 {
+    private function parseRegisterFilter(Request $request): ?int
+    {
+        $reg = $request->input('register');
+        if ($reg === null || $reg === '' || $reg === 'all') {
+            return null;
+        }
+        return ((string) $reg === '2') ? 2 : 1;
+    }
+
+    private function applyRegisterFilter($query, ?int $register, string $column = 'register_number')
+    {
+        if ($register === null) {
+            return $query;
+        }
+        if ($register === 1) {
+            return $query->where(function ($q) use ($column) {
+                $q->where($column, 1)->orWhereNull($column);
+            });
+        }
+        return $query->where($column, $register);
+    }
+
     public function sales(Request $request)
     {
         $request->validate(['from' => 'required|date', 'to' => 'required|date|after_or_equal:from']);
+        $hasRegister = \App\Support\RegisterSchema::ensureColumns();
+        $registerFilter = $hasRegister ? $this->parseRegisterFilter($request) : null;
         $restaurantId = $request->user()->restaurant_id;
         $from = Carbon::parse($request->from)->setTime(6, 0, 0);
         $to_with_time = Carbon::parse($request->to)->addDay()->setTime(5, 59, 59);
 
-        $summary = Order::where('restaurant_id', $restaurantId)->where('status', 'paid')
-            ->whereBetween('paid_at', [$from, $to_with_time])
+        $summaryQuery = Order::where('restaurant_id', $restaurantId)->where('status', 'paid')
+            ->whereBetween('paid_at', [$from, $to_with_time]);
+        $this->applyRegisterFilter($summaryQuery, $registerFilter);
+
+        $summary = $summaryQuery
             ->selectRaw('COUNT(*) as orders_count, SUM(total) as revenue, AVG(total) as avg_ticket, SUM(covers) as total_covers, SUM(discount_amount) as total_discounts, SUM(vat_amount) as total_vat')->first();
 
         // Convertir en tableau pour pouvoir ajouter des champs personnalisés facilement
@@ -30,23 +57,19 @@ class ReportController extends Controller
             'total_covers' => 0, 'total_discounts' => 0, 'total_vat' => 0
         ];
 
-        // Ajouter le CA des gâteaux au résumé
-        $cakeRevenue = \App\Models\Payment::whereHas('cakeOrder', function($q) use ($restaurantId) {
+        // Ajouter le CA des gâteaux/divers au résumé
+        $cakeQuery = \App\Models\Payment::whereHas('cakeOrder', function($q) use ($restaurantId) {
                 $q->where('restaurant_id', $restaurantId);
             })
-            ->whereBetween('created_at', [$from, $to_with_time])
-            ->sum('amount');
+            ->whereBetween('created_at', [$from, $to_with_time]);
+        $this->applyRegisterFilter($cakeQuery, $registerFilter);
+        $cakeRevenue = (clone $cakeQuery)->sum('amount');
         
         $summaryData['revenue'] = (float)$summaryData['revenue'] + (float)$cakeRevenue;
         $summaryData['cake_revenue'] = (float)$cakeRevenue;
         
-        // Recalculer le ticket moyen si on inclut les gâteaux
-        $cakeCount = \App\Models\Payment::whereHas('cakeOrder', function($q) use ($restaurantId) {
-                $q->where('restaurant_id', $restaurantId);
-            })
-            ->whereBetween('created_at', [$from, $to_with_time])
-            ->distinct('cake_order_id')
-            ->count();
+        // Recalculer le ticket moyen si on inclut les gâteaux/divers
+        $cakeCount = (clone $cakeQuery)->distinct('cake_order_id')->count();
         
         $totalOrders = (int)$summaryData['orders_count'] + $cakeCount;
         $summaryData['avg_ticket'] = $totalOrders > 0 ? (float)$summaryData['revenue'] / $totalOrders : 0;
@@ -55,16 +78,20 @@ class ReportController extends Controller
         $dateField = DB::getDriverName() === 'sqlite' ? "strftime('%Y-%m-%d', datetime(paid_at, '-6 hours'))" : 'DATE(DATE_SUB(paid_at, INTERVAL 6 HOUR))';
         $paymentDateField = DB::getDriverName() === 'sqlite' ? "strftime('%Y-%m-%d', datetime(created_at, '-6 hours'))" : 'DATE(DATE_SUB(created_at, INTERVAL 6 HOUR))';
 
-        $byDay = Order::where('restaurant_id', $restaurantId)->where('status', 'paid')
-            ->whereBetween('paid_at', [$from, $to_with_time])
+        $byDayQuery = Order::where('restaurant_id', $restaurantId)->where('status', 'paid')
+            ->whereBetween('paid_at', [$from, $to_with_time]);
+        $this->applyRegisterFilter($byDayQuery, $registerFilter);
+        $byDay = $byDayQuery
             ->selectRaw("$dateField as date, COUNT(*) as orders, SUM(total) as revenue")
             ->groupBy('date')->orderBy('date')->get();
 
         // Ajouter les gâteaux par jour
-        $cakeByDay = \App\Models\Payment::whereHas('cakeOrder', function($q) use ($restaurantId) {
+        $cakeByDayQuery = \App\Models\Payment::whereHas('cakeOrder', function($q) use ($restaurantId) {
                 $q->where('restaurant_id', $restaurantId);
             })
-            ->whereBetween('created_at', [$from, $to_with_time])
+            ->whereBetween('created_at', [$from, $to_with_time]);
+        $this->applyRegisterFilter($cakeByDayQuery, $registerFilter);
+        $cakeByDay = $cakeByDayQuery
             ->selectRaw("$paymentDateField as date, COUNT(DISTINCT cake_order_id) as orders, SUM(amount) as revenue")
             ->groupBy('date')
             ->get();
@@ -86,19 +113,72 @@ class ReportController extends Controller
             }
         });
 
-        $byMethod = Payment::where(function ($q) use ($restaurantId) {
+        $byMethodQuery = Payment::where(function ($q) use ($restaurantId) {
             $q->whereHas('order', fn($q) => $q->where('restaurant_id', $restaurantId))
                 ->orWhereHas('cakeOrder', fn($q) => $q->where('restaurant_id', $restaurantId));
         })
-            ->whereBetween('created_at', [$from, $to_with_time])
+            ->whereBetween('created_at', [$from, $to_with_time]);
+        $this->applyRegisterFilter($byMethodQuery, $registerFilter);
+        $byMethod = $byMethodQuery
             ->selectRaw('method, SUM(amount) as total, COUNT(*) as count')->groupBy('method')->get();
 
-        return response()->json(['summary' => $summaryData, 'by_day' => $mergedByDay->sortBy('date')->values(), 'by_method' => $byMethod]);
+        // Ventilation comparative Caisse 1 vs Caisse 2 sur la période (toujours calculée sur le global)
+        $byRegister = [];
+        $totalBothRegisters = 0;
+        foreach ([1, 2] as $regNum) {
+            $regOrderQuery = Order::where('restaurant_id', $restaurantId)->where('status', 'paid')
+                ->whereBetween('paid_at', [$from, $to_with_time]);
+            if ($hasRegister) {
+                $this->applyRegisterFilter($regOrderQuery, $regNum);
+            } elseif ($regNum === 2) {
+                $regOrderQuery->whereRaw('1 = 0');
+            }
+            $regOrders = $regOrderQuery->selectRaw('COUNT(*) as orders_count, SUM(total) as revenue, SUM(covers) as total_covers')->first();
+
+            $regCakeQuery = \App\Models\Payment::whereHas('cakeOrder', fn($q) => $q->where('restaurant_id', $restaurantId))
+                ->whereBetween('created_at', [$from, $to_with_time]);
+            if ($hasRegister) {
+                $this->applyRegisterFilter($regCakeQuery, $regNum);
+            } elseif ($regNum === 2) {
+                $regCakeQuery->whereRaw('1 = 0');
+            }
+            $regCakeRev = (float) (clone $regCakeQuery)->sum('amount');
+            $regCakeCnt = (int) (clone $regCakeQuery)->distinct('cake_order_id')->count();
+
+            $regRevenue = (float) ($regOrders->revenue ?? 0) + $regCakeRev;
+            $regOrdersCount = (int) ($regOrders->orders_count ?? 0) + $regCakeCnt;
+            $totalBothRegisters += $regRevenue;
+
+            $byRegister[(string) $regNum] = [
+                'register'     => $regNum,
+                'label'        => "Caisse {$regNum}",
+                'revenue'      => round($regRevenue, 2),
+                'orders_count' => $regOrdersCount,
+                'avg_ticket'   => $regOrdersCount > 0 ? round($regRevenue / $regOrdersCount, 2) : 0,
+                'total_covers' => (int) ($regOrders->total_covers ?? 0),
+                'share'        => 0,
+            ];
+        }
+
+        foreach ($byRegister as $key => $row) {
+            $byRegister[$key]['share'] = $totalBothRegisters > 0
+                ? round(($row['revenue'] / $totalBothRegisters) * 100, 1)
+                : 0;
+        }
+
+        return response()->json([
+            'summary'     => $summaryData,
+            'by_day'      => $mergedByDay->sortBy('date')->values(),
+            'by_method'   => $byMethod,
+            'by_register' => $byRegister,
+        ]);
     }
 
     public function topProducts(Request $request)
     {
         $request->validate(['from' => 'required|date', 'to' => 'required|date', 'limit' => 'integer|min:5|max:50', 'destination' => 'nullable|string']);
+        $hasRegister = \App\Support\RegisterSchema::ensureColumns();
+        $registerFilter = $hasRegister ? $this->parseRegisterFilter($request) : null;
         $restaurantId = $request->user()->restaurant_id;
         $from = Carbon::parse($request->from)->setTime(6, 0, 0);
         $to_with_time = Carbon::parse($request->to)->addDay()->setTime(5, 59, 59);
@@ -106,18 +186,23 @@ class ReportController extends Controller
         $products = OrderItem::with('product:id,name,image')
             ->join('products', 'order_items.product_id', '=', 'products.id')
             ->join('categories', 'products.category_id', '=', 'categories.id')
-            ->whereHas('order', fn($q) => $q->where('restaurant_id', $restaurantId)->where('status', 'paid')->whereBetween('paid_at', [$from, $to_with_time]))
+            ->whereHas('order', function ($q) use ($restaurantId, $from, $to_with_time, $registerFilter) {
+                $q->where('restaurant_id', $restaurantId)->where('status', 'paid')->whereBetween('paid_at', [$from, $to_with_time]);
+                $this->applyRegisterFilter($q, $registerFilter);
+            })
             ->whereNotIn('order_items.status', ['cancelled'])
             ->when($request->destination, fn($q) => $q->where('categories.destination', $request->destination))
             ->selectRaw('order_items.product_id, SUM(order_items.quantity) as total_qty, SUM(order_items.subtotal) as total_revenue, SUM(order_items.subtotal) as revenue')
             ->groupBy('order_items.product_id')->orderByDesc('total_revenue')->limit($request->limit ?? 10)->get();
 
-        // Si pas de filtre de destination bar/pizza, on ajoute les gâteaux
+        // Si pas de filtre de destination bar/pizza, on ajoute les gâteaux/divers
         if (!$request->destination || $request->destination === 'gateaux') {
-            $cakes = \App\Models\Payment::whereHas('cakeOrder', function($q) use ($restaurantId) {
+            $cakesQuery = \App\Models\Payment::whereHas('cakeOrder', function($q) use ($restaurantId) {
                     $q->where('restaurant_id', $restaurantId);
                 })
-                ->whereBetween('created_at', [$from, $to_with_time])
+                ->whereBetween('created_at', [$from, $to_with_time]);
+            $this->applyRegisterFilter($cakesQuery, $registerFilter);
+            $cakes = $cakesQuery
                 ->with('cakeOrder')
                 ->get()
                 ->groupBy('cake_order_id')
@@ -129,7 +214,7 @@ class ReportController extends Controller
                         'total_revenue' => (float)$group->sum('amount'),
                         'revenue' => (float)$group->sum('amount'),
                         'product' => (object)[
-                            'name' => "GATEAU: " . ($first->cakeOrder->customer_name ?? 'Client') . " (#" . ($first->cakeOrder->order_number ?? 'N/A') . ")",
+                            'name' => "DIVERS: " . ($first->cakeOrder->customer_name ?? 'Client') . " (#" . ($first->cakeOrder->order_number ?? 'N/A') . ")",
                             'image' => null
                         ]
                     ];
@@ -144,18 +229,20 @@ class ReportController extends Controller
     public function byWaiter(Request $request)
     {
         $request->validate(['from' => 'required|date', 'to' => 'required|date']);
+        $hasRegister = \App\Support\RegisterSchema::ensureColumns();
+        $registerFilter = $hasRegister ? $this->parseRegisterFilter($request) : null;
         $restaurantId = $request->user()->restaurant_id;
         $from = Carbon::parse($request->from)->setTime(6, 0, 0);
         $to_with_time = Carbon::parse($request->to)->addDay()->setTime(5, 59, 59);
 
-        $data = Order::with('waiter:id,first_name,last_name')->where('restaurant_id', $restaurantId)->where('status', 'paid')
-            ->whereBetween('paid_at', [$from, $to_with_time])
+        $waiterQuery = Order::with('waiter:id,first_name,last_name')->where('restaurant_id', $restaurantId)->where('status', 'paid')
+            ->whereBetween('paid_at', [$from, $to_with_time]);
+        $this->applyRegisterFilter($waiterQuery, $registerFilter);
+
+        $data = $waiterQuery
             ->selectRaw('user_id, COUNT(*) as orders_count, SUM(total) as revenue, AVG(total) as avg_ticket')
             ->groupBy('user_id')->orderByDesc('revenue')->get();
         
-        // Note: Les gâteaux ne sont pas encore liés à un serveur/waiter spécifique dans la table cake_orders
-        // donc ils n'apparaissent pas ici pour l'instant.
-
         return response()->json($data->values());
     }
 
@@ -196,21 +283,26 @@ class ReportController extends Controller
 
     public function cashSummary(Request $request)
     {
-        $request->validate(['date' => 'nullable|date']);
-        $date = $request->date ?? today()->toDateString();
+        $request->validate(['date' => 'nullable|date', 'from' => 'nullable|date', 'to' => 'nullable|date']);
+        $hasRegister = \App\Support\RegisterSchema::ensureColumns();
+        $registerFilter = $hasRegister ? $this->parseRegisterFilter($request) : null;
+        $fromDate = $request->from ?? $request->date ?? today()->toDateString();
+        $toDate = $request->to ?? $fromDate;
         $restaurantId = $request->user()->restaurant_id;
-        $start = Carbon::parse($date)->setTime(6, 0, 0);
-        $end = (clone $start)->addDay()->setTime(5, 59, 59);
+        $start = Carbon::parse($fromDate)->setTime(6, 0, 0);
+        $end = Carbon::parse($toDate)->addDay()->setTime(5, 59, 59);
 
         $sessions = \App\Models\CashSession::with('user:id,first_name,last_name')->where('restaurant_id', $restaurantId)->whereBetween('opened_at', [$start, $end])->get();
-        $payments = Payment::where(function ($q) use ($restaurantId) {
+        $paymentsQuery = Payment::where(function ($q) use ($restaurantId) {
             $q->whereHas('order', fn($q) => $q->where('restaurant_id', $restaurantId))
                 ->orWhereHas('cakeOrder', fn($q) => $q->where('restaurant_id', $restaurantId));
         })
-            ->whereBetween('created_at', [$start, $end])
+            ->whereBetween('created_at', [$start, $end]);
+        $this->applyRegisterFilter($paymentsQuery, $registerFilter);
+        $payments = $paymentsQuery
             ->selectRaw('method, SUM(amount) as total, COUNT(*) as count')->groupBy('method')->get();
 
-        return response()->json(['date' => $date, 'sessions' => $sessions, 'payments' => $payments, 'total' => $payments->sum('total')]);
+        return response()->json(['date' => $fromDate, 'sessions' => $sessions, 'payments' => $payments, 'total' => $payments->sum('total')]);
     }
 
     public function dashboard(Request $request)
@@ -320,17 +412,20 @@ class ReportController extends Controller
     {
         $request->validate([
             'date'        => 'nullable|date',
-            'destination' => 'nullable|string'
+            'destination' => 'nullable|string',
+            'register'    => 'nullable|string',
         ]);
 
+        $hasRegister = \App\Support\RegisterSchema::ensureColumns();
+        $registerFilter = $hasRegister ? $this->parseRegisterFilter($request) : null;
         $date = $request->date ?? today()->toDateString();
         $restaurantId = $request->user()->restaurant_id;
         $start = Carbon::parse($date)->setTime(6, 0, 0);
         $end = (clone $start)->addDay()->setTime(5, 59, 59);
 
-        $items = OrderItem::query()
+        $allItemsUnfiltered = OrderItem::query()
             ->join('orders', 'order_items.order_id', '=', 'orders.id')
-            ->where('orders.restaurant_id', $request->user()->restaurant_id)
+            ->where('orders.restaurant_id', $restaurantId)
             ->whereNotIn('orders.status', ['cancelled'])
             ->whereBetween('orders.created_at', [$start, $end])
             ->whereNull('order_items.deleted_at')
@@ -338,11 +433,36 @@ class ReportController extends Controller
             ->with(['order', 'product.category'])
             ->get();
 
-        $allItems = $items;
+        // Résumé par caisse (Caisse 1 vs Caisse 2) sur la journée
+        $summaryByRegister = [];
+        foreach ([1, 2] as $regNum) {
+            $regItems = $allItemsUnfiltered->filter(function ($item) use ($regNum, $hasRegister) {
+                if (!$hasRegister) {
+                    return $regNum === 1;
+                }
+                $r = (int) ($item->order->register_number ?? 1);
+                return $r === $regNum;
+            });
+            $summaryByRegister[(string) $regNum] = [
+                'register'     => $regNum,
+                'label'        => "Caisse {$regNum}",
+                'revenue'      => (float) $regItems->unique('order_id')->sum(fn($item) => (float) ($item->order->total ?? 0)),
+                'orders_count' => $regItems->unique('order_id')->count(),
+                'items_count'  => (int) $regItems->sum('quantity'),
+            ];
+        }
 
-        // Résumé global par destination pour les onglets
+        // Filtrer par caisse si demandé
+        $allItems = $registerFilter !== null
+            ? $allItemsUnfiltered->filter(fn($item) => ((int) ($item->order->register_number ?? 1)) === $registerFilter)
+            : $allItemsUnfiltered;
+
+        $items = $allItems;
+
+        // Résumé global par destination pour les onglets (selon la caisse sélectionnée)
         $summaryByDestination = $allItems->groupBy(function ($item) {
-            return $item->product?->category?->destination ?? 'kitchen';
+            $dest = $item->product?->category?->destination ?? 'kitchen';
+            return $dest === 'pizza' ? 'kitchen' : $dest;
         })->map(function ($group) {
             return [
                 'revenue' => (float) $group->sum(function ($item) {
@@ -358,7 +478,9 @@ class ReportController extends Controller
         // Filtrer par destination via la collection
         if ($request->destination && $request->destination !== 'all') {
             $items = $items->filter(function ($item) use ($request) {
-                return ($item->product?->category?->destination ?? 'kitchen') === $request->destination;
+                $dest = $item->product?->category?->destination ?? 'kitchen';
+                if ($dest === 'pizza') $dest = 'kitchen';
+                return $dest === $request->destination;
             });
         }
 
@@ -374,11 +496,14 @@ class ReportController extends Controller
         ];
 
         return response()->json([
-            'date'    => $date,
-            'items'   => $items->values(),
-            'summary' => $summary,
+            'date'                   => $date,
+            'register'               => $registerFilter ? (string) $registerFilter : 'all',
+            'items'                  => $items->values(),
+            'summary'                => $summary,
             'summary_by_destination' => $summaryByDestination,
-            'total_all' => (float) $allItems->unique('order_id')->sum(fn($item) => $item->order->total)
+            'summary_by_register'    => $summaryByRegister,
+            'total_all'              => (float) $allItems->unique('order_id')->sum(fn($item) => (float) ($item->order->total ?? 0)),
+            'total_general'          => (float) $allItemsUnfiltered->unique('order_id')->sum(fn($item) => (float) ($item->order->total ?? 0)),
         ]);
     }
 

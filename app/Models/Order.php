@@ -14,7 +14,7 @@ class Order extends Model
     const AUDIT_MODULE = 'order';
 
     protected $fillable = [
-        'restaurant_id', 'table_id', 'user_id', 'cashier_id',
+        'restaurant_id', 'table_id', 'user_id', 'cashier_id', 'register_number',
         'order_number', 'type', 'status', 'covers',
         'customer_name', 'customer_phone', 'server_name',
         'subtotal', 'discount_type', 'discount_value', 'discount_amount', 'discount_reason', 'discount_authorizer_name',
@@ -23,6 +23,7 @@ class Order extends Model
     ];
 
     protected $casts = [
+        'register_number'    => 'integer',
         'subtotal'           => 'decimal:2',
         'discount_value'     => 'decimal:2',
         'discount_amount'    => 'decimal:2',
@@ -33,6 +34,15 @@ class Order extends Model
         'served_at'          => 'datetime',
         'paid_at'            => 'datetime',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(function (Order $order) {
+            if (\App\Support\RegisterSchema::ensureColumns() && empty($order->register_number)) {
+                $order->register_number = \App\Support\RegisterSchema::currentRegisterNumber();
+            }
+        });
+    }
 
     /**
      * Empêcher la conversion de fuseau horaire lors de la sérialisation JSON

@@ -71,7 +71,11 @@ class PaymentController extends Controller
             // Ajout d'une tolérance de rounding (1 unité de devise) pour marquer comme payé
             \Illuminate\Support\Facades\Log::info("Payment Check Order #{$order->id}: Paid={$amountPaid}, Total={$order->total}");
             if ($amountPaid >= ($order->total - 1)) {
-                $order->update(['status' => 'paid', 'paid_at' => now(), 'cashier_id' => Auth::id()]);
+                $orderUpdate = ['status' => 'paid', 'paid_at' => now(), 'cashier_id' => Auth::id()];
+                if (\App\Support\RegisterSchema::ensureColumns()) {
+                    $orderUpdate['register_number'] = \App\Support\RegisterSchema::currentRegisterNumber();
+                }
+                $order->update($orderUpdate);
                 $order->refresh();
                 \Illuminate\Support\Facades\Log::info("Order #{$order->id} marked as PAID (Loyalty Token: " . ($order->loyalty_token ?: 'None') . ")");
 
@@ -143,6 +147,9 @@ class PaymentController extends Controller
             }
 
             $updateData = ['status' => 'paid', 'paid_at' => now(), 'cashier_id' => Auth::id()];
+            if (\App\Support\RegisterSchema::ensureColumns()) {
+                $updateData['register_number'] = \App\Support\RegisterSchema::currentRegisterNumber();
+            }
             if ($request->customer_name) {
                 $updateData['customer_name'] = $request->customer_name;
             }
