@@ -31,4 +31,25 @@ class Table extends Model
     {
         return $this->hasOne(Order::class)->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served', 'served'])->latest('created_at');
     }
+
+    /**
+     * Retourne la valeur ENUM valide pour une table libre ('available' ou 'free').
+     */
+    public static function freeStatus(): string
+    {
+        return \Illuminate\Support\Facades\Cache::remember('tables_free_status_v1', 3600, function () {
+            try {
+                if (\Illuminate\Support\Facades\DB::getDriverName() === 'mysql') {
+                    $col = \Illuminate\Support\Facades\DB::selectOne("SHOW COLUMNS FROM tables LIKE 'status'");
+                    $type = strtolower($col->Type ?? '');
+                    if (str_contains($type, "'available'") && !str_contains($type, "'free'")) {
+                        return 'available';
+                    }
+                }
+            } catch (\Throwable $e) {
+                // fallback
+            }
+            return 'free';
+        });
+    }
 }

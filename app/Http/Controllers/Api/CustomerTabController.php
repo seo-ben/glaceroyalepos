@@ -165,7 +165,7 @@ class CustomerTabController extends Controller
             // Libérer la table si elle était assignée
             if ($order->table_id) {
                 \App\Models\Table::where('id', $order->table_id)->update([
-                    'status' => 'free',
+                    'status' => \App\Models\Table::freeStatus(),
                     'occupied_since' => null,
                     'assigned_user_id' => null,
                 ]);

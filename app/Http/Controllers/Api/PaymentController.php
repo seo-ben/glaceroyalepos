@@ -36,6 +36,8 @@ class PaymentController extends Controller
 
         abort_if(!$session, 422, 'Aucune session de caisse ouverte. Veuillez ouvrir une session de caisse avant d\'encaisser.');
 
+        \App\Support\RegisterSchema::ensureColumns();
+
         DB::transaction(function () use ($request, $order, $session) {
             $order->recalculate();
             $order->refresh();
@@ -81,7 +83,7 @@ class PaymentController extends Controller
 
                 if ($order->table_id) {
                     \App\Models\Table::where('id', $order->table_id)->update([
-                        'status'           => 'free',
+                        'status'           => \App\Models\Table::freeStatus(),
                         'occupied_since'   => null,
                         'assigned_user_id' => null,
                     ]);
@@ -130,6 +132,8 @@ class PaymentController extends Controller
         $totalPayments = collect($request->payments)->sum('amount');
         abort_if($totalPayments < $order->total, 422, "Montant insuffisant. Requis: {$order->total} FCFA");
 
+        \App\Support\RegisterSchema::ensureColumns();
+
         DB::transaction(function () use ($request, $order) {
             $session = CashSession::where('restaurant_id', $request->user()->restaurant_id)
                 ->whereNull('closed_at')->latest()->first();
@@ -160,7 +164,7 @@ class PaymentController extends Controller
             $order->refresh();
 
             if ($order->table_id) {
-                $order->table->update(['status' => 'free', 'occupied_since' => null, 'assigned_user_id' => null]);
+                $order->table->update(['status' => \App\Models\Table::freeStatus(), 'occupied_since' => null, 'assigned_user_id' => null]);
             }
 
             ProcessStockDeduction::dispatch($order);
