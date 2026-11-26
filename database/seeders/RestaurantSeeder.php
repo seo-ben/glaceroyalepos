@@ -55,16 +55,16 @@ class RestaurantSeeder extends Seeder
         // 1. Création du Restaurant principal
         $restaurant = Restaurant::create([
             'id'       => 1,
-            'name'     => 'SmartFlow ',
-            'slug'     => 'cigusta-omega',
-            'address'  => 'Zone Aéroportuaire, Lomé, Togo',
+            'name'     => 'GLACE ROYALE - CETEF (GRC)',
+            'slug'     => 'glace-royale-cetef',
+            'address'  => 'CETEF, Lomé, Togo',
             'phone'    => '+228 90 00 00 00',
-            'email'    => 'contact@cigusta.tg',
+            'email'    => 'contact@glaceroyalpos.net',
             'logo'     => 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e3/Ice_cream_icon.svg/512px-Ice_cream_icon.svg.png',
             'currency' => 'XOF',
             'timezone' => 'Africa/Lome',
             'settings' => [
-                'receipt_footer'     => 'Merci pour votre confiance ! Certifié par SmartFlow POS.',
+                'receipt_footer'     => 'Merci pour votre confiance ! GLACE ROYALE - CETEF.',
                 'receipt_width'      => '58mm',
                 'default_vat_rate'   => 1,
                 'auto_print_receipt' => true,
@@ -126,13 +126,15 @@ class RestaurantSeeder extends Seeder
             ]);
         }
 
-        // 5. Catégories avec Destinations (Crucial pour le routage)
+        // 5. Catégories GLACE ROYALE - CETEF (GRC) avec Destinations (bar = Glaces, kitchen = Cuisine)
         $categories = [
-            ['name' => 'Pizzas 🍕',   'dest' => 'pizza',   'color' => '#E53935'],
-            ['name' => 'Burgers 🍔',  'dest' => 'kitchen', 'color' => '#FF9800'],
-            ['name' => 'Plats 🍲',    'dest' => 'kitchen', 'color' => '#4CAF50'],
-            ['name' => 'Boissons 🥤', 'dest' => 'bar',     'color' => '#2196F3'],
-            ['name' => 'Desserts 🍦', 'dest' => 'kitchen', 'color' => '#9C27B0'],
+            ['name' => 'Glacier 🍦',           'dest' => 'bar',     'color' => '#0EA5E9'],
+            ['name' => 'Beignets & Snacks 🍩', 'dest' => 'kitchen', 'color' => '#F59E0B'],
+            ['name' => 'Riz Cantonais 🍛',     'dest' => 'kitchen', 'color' => '#EF4444'],
+            ['name' => 'Akpan / Ablo 🥣',      'dest' => 'kitchen', 'color' => '#10B981'],
+            ['name' => 'Frites / Koliko 🍟',   'dest' => 'kitchen', 'color' => '#F97316'],
+            ['name' => 'Spaghetti 🍝',         'dest' => 'kitchen', 'color' => '#8B5CF6'],
+            ['name' => 'Boissons 🥤',          'dest' => 'bar',     'color' => '#3B82F6'],
         ];
 
         $createdCats = [];
@@ -147,21 +149,47 @@ class RestaurantSeeder extends Seeder
             ]);
         }
 
-        // 6. Produits avec Emojis
+        // 6. Produits GLACE ROYALE - CETEF (GRC)
         $productsData = [
-            'Pizzas 🍕' => [
-                ['name' => 'Margherita', 'price' => 4500, 'emoji' => '🍕'],
-                ['name' => 'Regina',     'price' => 6000, 'emoji' => '🍕'],
-                ['name' => 'Calzone',    'price' => 6500, 'emoji' => '🥟'],
+            'Glacier 🍦' => [
+                ['name' => 'Vanille (500 F)',        'price' => 500,  'emoji' => '🍦'],
+                ['name' => 'Vanille (1 000 F)',      'price' => 1000, 'emoji' => '🍦'],
+                ['name' => 'Chocolat (500 F)',       'price' => 500,  'emoji' => '🍫'],
+                ['name' => 'Chocolat (1 000 F)',     'price' => 1000, 'emoji' => '🍫'],
+                ['name' => 'Fraise (500 F)',         'price' => 500,  'emoji' => '🍓'],
+                ['name' => 'Fraise (1 000 F)',       'price' => 1000, 'emoji' => '🍓'],
+                ['name' => 'Oréo (500 F)',           'price' => 500,  'emoji' => '🍪'],
+                ['name' => 'Oréo (1 000 F)',         'price' => 1000, 'emoji' => '🍪'],
+                ['name' => 'Lotus Menthe',           'price' => 1000, 'emoji' => '🌿'],
+                ['name' => 'Speculos Lotus',         'price' => 1000, 'emoji' => '🍪'],
+                ['name' => 'Caramel',                'price' => 1000, 'emoji' => '🍮'],
+                ['name' => 'Mangue',                 'price' => 1000, 'emoji' => '🥭'],
+                ['name' => 'Passion',                'price' => 1000, 'emoji' => '🍈'],
+                ['name' => 'Stracciatella (500 F)',  'price' => 500,  'emoji' => '🍨'],
+                ['name' => 'Stracciatella (1 000 F)','price' => 1000, 'emoji' => '🍨'],
+                ['name' => 'Bubble Tea',             'price' => 1200, 'emoji' => '🧋'],
+                ['name' => 'Slasch (500 F)',         'price' => 500,  'emoji' => '🧊'],
+                ['name' => 'Slasch (1 000 F)',       'price' => 1000, 'emoji' => '🧊'],
             ],
-            'Burgers 🍔' => [
-                ['name' => 'Cheese Burger', 'price' => 3500, 'emoji' => '🍔'],
-                ['name' => 'Double Bacon',  'price' => 5500, 'emoji' => '🥓'],
+            'Beignets & Snacks 🍩' => [
+                ['name' => '6 Beignets / Gawou', 'price' => 1000, 'emoji' => '🍩'],
             ],
-            'Boissons 🥤' => [
-                ['name' => 'Coca Cola',   'price' => 800,  'emoji' => '🥤'],
-                ['name' => 'Eau Minérale', 'price' => 500,  'emoji' => '💧'],
-                ['name' => 'Bière Togocel oui oui ', 'price' => 1200, 'emoji' => '🍺'],
+            'Riz Cantonais 🍛' => [
+                ['name' => 'Riz cantonais + 1 cuisse de poulet local', 'price' => 2000, 'emoji' => '🍗'],
+                ['name' => 'Riz cantonais + 6 morceaux de viande',     'price' => 1500, 'emoji' => '🥩'],
+                ['name' => 'Riz cantonais + 1 morceau de poisson',     'price' => 1500, 'emoji' => '🐟'],
+            ],
+            'Akpan / Ablo 🥣' => [
+                ['name' => 'Akpan / Ablo + 1 morceau de poisson',    'price' => 1500, 'emoji' => '🐟'],
+                ['name' => "Akpan / Ablo + 2 morceaux d'Adokougbi",  'price' => 1500, 'emoji' => '🍲'],
+            ],
+            'Frites / Koliko 🍟' => [
+                ['name' => 'Koliko + 2 saucisses', 'price' => 1000, 'emoji' => '🌭'],
+                ['name' => 'Frites + 4 saucisses', 'price' => 2000, 'emoji' => '🍟'],
+            ],
+            'Spaghetti 🍝' => [
+                ['name' => 'Spaghetti + viande + 1 saucisse',         'price' => 1500, 'emoji' => '🍝'],
+                ['name' => 'Spaghetti + viande + 2 saucisses + 1 œuf','price' => 2000, 'emoji' => '🍳'],
             ],
         ];
 
