@@ -94,7 +94,11 @@ class PaymentController extends Controller
                     ->whereNotIn('status', ['cancelled', 'served'])
                     ->update(['status' => 'served', 'served_at' => now()]);
 
-                ProcessStockDeduction::dispatch($order);
+                try {
+                    ProcessStockDeduction::dispatchSync($order);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::error("Stock deduction dispatchSync error for Order #{$order->id}: " . $e->getMessage());
+                }
 
                 if (!empty($order->loyalty_token)) {
                     try {
@@ -167,7 +171,11 @@ class PaymentController extends Controller
                 $order->table->update(['status' => \App\Models\Table::freeStatus(), 'occupied_since' => null, 'assigned_user_id' => null]);
             }
 
-            ProcessStockDeduction::dispatch($order);
+            try {
+                ProcessStockDeduction::dispatchSync($order);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error("Stock deduction dispatchSync error for Order #{$order->id}: " . $e->getMessage());
+            }
 
             if (!empty($order->loyalty_token)) {
                 try {

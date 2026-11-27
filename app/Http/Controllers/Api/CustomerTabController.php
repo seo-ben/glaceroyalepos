@@ -172,7 +172,11 @@ class CustomerTabController extends Controller
             }
 
             // Déduire les stocks
-            \App\Jobs\ProcessStockDeduction::dispatch($order);
+            try {
+                \App\Jobs\ProcessStockDeduction::dispatchSync($order);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error("Stock deduction dispatchSync error for Order #{$order->id}: " . $e->getMessage());
+            }
         });
 
         $tab->logActivity('order_attached', "Commande #{$order->order_number} ajoutée à l'ardoise");

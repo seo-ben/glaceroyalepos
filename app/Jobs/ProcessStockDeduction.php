@@ -33,6 +33,7 @@ class ProcessStockDeduction implements ShouldQueue
 
                 // 1. Déduction directe de la quantité en stock du produit (si suivi de stock activé)
                 if ($product->track_stock) {
+                    $product->refresh();
                     $beforeQty = (float) $product->quantity;
                     $neededQty = (float) $item->quantity;
                     $afterQty  = max(0, $beforeQty - $neededQty);
@@ -51,6 +52,7 @@ class ProcessStockDeduction implements ShouldQueue
                     $ingredient = $recipe->ingredient;
                     if (!$ingredient) continue;
 
+                    $ingredient->refresh();
                     $quantityNeeded = (float) $recipe->quantity * (float) $item->quantity;
                     $before = (float) $ingredient->quantity;
                     $after  = max(0, $before - $quantityNeeded);
