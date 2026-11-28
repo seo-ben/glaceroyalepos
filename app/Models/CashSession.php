@@ -73,4 +73,31 @@ class CashSession extends Model
     {
         return $this->hasMany(Expense::class);
     }
+
+    /**
+     * Retourne la session de caisse ouverte pour l'utilisateur donné.
+     * Un caissier doit avoir sa propre session ; un manager/admin peut retomber
+     * sur la dernière session ouverte du restaurant s'il n'en a pas ouvert une.
+     */
+    public static function resolveActiveForUser(User $user): ?self
+    {
+        $own = self::where('restaurant_id', $user->restaurant_id)
+            ->where('user_id', $user->id)
+            ->whereNull('closed_at')
+            ->latest('opened_at')
+            ->first();
+
+        if ($own) {
+            return $own;
+        }
+
+        if ($user->isManager()) {
+            return self::where('restaurant_id', $user->restaurant_id)
+                ->whereNull('closed_at')
+                ->latest('opened_at')
+                ->first();
+        }
+
+        return null;
+    }
 }

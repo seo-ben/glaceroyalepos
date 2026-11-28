@@ -11,15 +11,19 @@ class ExpenseController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Expense::where('restaurant_id', $request->user()->restaurant_id)
-            ->with('user:id,first_name,last_name', 'cashSession:id,opened_at')
+        $user = $request->user();
+
+        $query = Expense::where('restaurant_id', $user->restaurant_id)
+            ->with('user:id,first_name,last_name', 'cashSession:id,opened_at,user_id')
+            ->when(!$user->isManager(), fn($q) => $q->where('user_id', $user->id))
+            ->when($user->isManager() && $request->filled('user_id') && $request->user_id !== 'all', fn($q) => $q->where('user_id', (int) $request->user_id))
             ->when($request->cash_session_id, fn($q) => $q->where('cash_session_id', $request->cash_session_id))
             ->when($request->date && !$request->cash_session_id, fn($q) => $q->whereDate('created_at', $request->date))
             ->when($request->category, fn($q) => $q->where('category', $request->category))
             ->latest();
 
+        $total = (clone $query)->sum('amount');
         $expenses = $request->cash_session_id ? $query->get() : $query->paginate(30);
-        $total = $request->cash_session_id ? $expenses->sum('amount') : Expense::where('restaurant_id', $request->user()->restaurant_id)->sum('amount');
 
         return response()->json([
             'data'  => $expenses,
@@ -41,13 +45,10 @@ class ExpenseController extends Controller
             'agent_name'     => 'nullable|string|max:255',
         ]);
 
-        // Rattacher à la session de caisse courante
-        $session = CashSession::where('restaurant_id', $request->user()->restaurant_id)
-            ->whereNull('closed_at')
-            ->latest()
-            ->first();
+        // Rattacher à la session de caisse active du caissier (ou session ouverte pour manager/admin)
+        $session = CashSession::resolveActiveForUser($request->user());
 
-        abort_unless(!!$session, 422, "Aucune session de caisse active. Veuillez d'abord ouvrir la caisse.");
+        abort_unless(!!$session, 422, "Aucune session de caisse active pour votre compte. Veuillez d'abord ouvrir votre caisse.");
 
         // Créer la dépense
         $expense = Expense::create([
@@ -81,6 +82,9 @@ class ExpenseController extends Controller
     {
         abort_if($expense->restaurant_id !== $request->user()->restaurant_id, 403);
         abort_unless($request->user()->isManager() || $request->user()->hasRole('cashier'), 403, 'Accès refusé : Seul un Admin, Manager ou Caissier peut modifier une dépense.');
+        if (!$request->user()->isManager()) {
+            abort_if((int) $expense->user_id !== (int) $request->user()->id, 403, 'Vous ne pouvez modifier que vos propres dépenses.');
+        }
 
         $request->validate([
             'category'       => 'required|string',
@@ -120,6 +124,9 @@ class ExpenseController extends Controller
     {
         abort_if($expense->restaurant_id !== $request->user()->restaurant_id, 403);
         abort_unless($request->user()->isManager() || $request->user()->hasRole('cashier'), 403, 'Accès refusé : Seul un Admin, Manager ou Caissier peut supprimer une dépense.');
+        if (!$request->user()->isManager()) {
+            abort_if((int) $expense->user_id !== (int) $request->user()->id, 403, 'Vous ne pouvez supprimer que vos propres dépenses.');
+        }
 
         $request->validate(['reason' => 'required|string|min:5']);
 

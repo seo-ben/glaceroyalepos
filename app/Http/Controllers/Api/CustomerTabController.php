@@ -279,8 +279,7 @@ class CustomerTabController extends Controller
 
         DB::transaction(function () use ($tab, $request) {
             $amountToDistribute = $request->amount;
-            $session = \App\Models\CashSession::where('restaurant_id', $request->user()->restaurant_id)
-                ->whereNull('closed_at')->latest()->first();
+            $session = \App\Models\CashSession::resolveActiveForUser($request->user());
 
             $orders = $tab->orders()->orderBy('created_at')->get();
             foreach ($orders as $o) {

@@ -53,8 +53,7 @@ class CakeOrderController extends Controller
         $advance = $request->advance_paid ?? 0;
         $pm = $request->payment_method ?? 'cash';
 
-        $session = CashSession::where('restaurant_id', $request->user()->restaurant_id)
-            ->whereNull('closed_at')->latest()->first();
+        $session = CashSession::resolveActiveForUser($request->user());
 
         $order = DB::transaction(function() use ($request, $total, $advance, $session, $pm) {
             $order = CakeOrder::create([
@@ -177,8 +176,9 @@ class CakeOrderController extends Controller
         DB::transaction(function () use ($cakeOrder, $pm, $am, $request) {
             $totalPaid = $cakeOrder->advance_paid + $am;
 
-            $session = CashSession::where('restaurant_id', $cakeOrder->restaurant_id)
-                ->whereNull('closed_at')->latest()->first();
+            $session = $request->user()
+                ? CashSession::resolveActiveForUser($request->user())
+                : CashSession::where('restaurant_id', $cakeOrder->restaurant_id)->whereNull('closed_at')->latest()->first();
 
             $cakeOrder->update([
                 'is_paid'           => true,

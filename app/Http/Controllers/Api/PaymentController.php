@@ -31,10 +31,9 @@ class PaymentController extends Controller
         abort_if($order->status === 'paid', 422, 'Commande déjà payée.');
         abort_if($order->status === 'cancelled', 422, 'Commande annulée.');
 
-        $session = CashSession::where('restaurant_id', $request->user()->restaurant_id)
-            ->whereNull('closed_at')->latest()->first();
+        $session = CashSession::resolveActiveForUser($request->user());
 
-        abort_if(!$session, 422, 'Aucune session de caisse ouverte. Veuillez ouvrir une session de caisse avant d\'encaisser.');
+        abort_if(!$session, 422, 'Aucune session de caisse ouverte pour votre compte. Veuillez ouvrir votre caisse avant d\'encaisser.');
 
         \App\Support\RegisterSchema::ensureColumns();
 
@@ -139,8 +138,7 @@ class PaymentController extends Controller
         \App\Support\RegisterSchema::ensureColumns();
 
         DB::transaction(function () use ($request, $order) {
-            $session = CashSession::where('restaurant_id', $request->user()->restaurant_id)
-                ->whereNull('closed_at')->latest()->first();
+            $session = CashSession::resolveActiveForUser($request->user());
 
             foreach ($request->payments as $p) {
                 Payment::create([

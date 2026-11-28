@@ -25,13 +25,25 @@ class OrderController extends Controller
 
     public function index(Request $request)
     {
+        $user = $request->user();
         $includeCakes = $request->has('include_cakes') || $request->type === 'cakes';
 
         $query = Order::with([
-            'table', 'waiter', 'items.product.category',
+            'table', 'waiter', 'cashier:id,first_name,last_name', 'items.product.category',
             'cancellations'       => fn($q) => $q->where('status', 'pending'),
             'items.cancellations' => fn($q) => $q->where('status', 'pending'),
-        ])->where('restaurant_id', $request->user()->restaurant_id);
+        ])->where('restaurant_id', $user->restaurant_id);
+
+        if (!$user->isManager()) {
+            $query->where(function ($q) use ($user) {
+                $q->where('user_id', $user->id)->orWhere('cashier_id', $user->id);
+            });
+        } elseif ($request->filled('user_id') && $request->user_id !== 'all') {
+            $uid = (int) $request->user_id;
+            $query->where(function ($q) use ($uid) {
+                $q->where('user_id', $uid)->orWhere('cashier_id', $uid);
+            });
+        }
 
         if ($request->filled('search')) {
             $query->where(function ($q) use ($request) {
@@ -59,7 +71,12 @@ class OrderController extends Controller
         $orders = $query->latest()->paginate($request->per_page ?? 30);
 
         if ($includeCakes) {
-            $cakesQuery = \App\Models\CakeOrder::where('restaurant_id', $request->user()->restaurant_id);
+            $cakesQuery = \App\Models\CakeOrder::where('restaurant_id', $user->restaurant_id);
+            if (!$user->isManager()) {
+                $cakesQuery->where('user_id', $user->id);
+            } elseif ($request->filled('user_id') && $request->user_id !== 'all') {
+                $cakesQuery->where('user_id', (int) $request->user_id);
+            }
 
             if ($request->filled('search')) {
                 $cakesQuery->where(function ($q) use ($request) {
@@ -351,9 +368,9 @@ class OrderController extends Controller
                 ->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served'])
                 ->exists();
 
-            if (!$otherOpen && $order->table) {
-                $order->table->update([
-                    'status'           => 'available',
+            if (!$otherOpen && $order->table_id) {
+                Table::where('id', $order->table_id)->update([
+                    'status'           => Table::freeStatus(),
                     'occupied_since'   => null,
                     'assigned_user_id' => null,
                 ]);
@@ -699,9 +716,9 @@ class OrderController extends Controller
                     ->whereIn('status', ['open', 'sent_to_kitchen', 'partially_served'])
                     ->exists();
 
-                if (!$otherOpen && $order->table) {
-                    $order->table->update([
-                        'status'           => 'available',
+                if (!$otherOpen) {
+                    Table::where('id', $order->table_id)->update([
+                        'status'           => Table::freeStatus(),
                         'occupied_since'   => null,
                         'assigned_user_id' => null,
                     ]);
@@ -806,7 +823,7 @@ class OrderController extends Controller
             ]);
 
             if ($order->table_id) {
-                $table = $order->table;
+                $table = Table::find($order->table_id);
                 if ($table && in_array(strtolower($table->status), ['available', 'free'])) {
                     $table->update([
                         'status'           => 'occupied',

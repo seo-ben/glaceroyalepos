@@ -17,48 +17,161 @@ class CashSessionController extends Controller
     /** Session courante avec tous les totaux */
     public function current(Request $request)
     {
-        $session = CashSession::where('restaurant_id', $request->user()->restaurant_id)
+        $user = $request->user();
+        $isManager = $user->isManager();
+        $requestedUserId = $request->query('user_id');
+
+        // Pour un caissier : uniquement sa propre session ouverte
+        if (!$isManager) {
+            $session = CashSession::where('restaurant_id', $user->restaurant_id)
+                ->where('user_id', $user->id)
+                ->whereNull('closed_at')
+                ->with('user:id,first_name,last_name')
+                ->latest('opened_at')
+                ->first();
+
+            if (!$session) return response()->json(null);
+
+            return response()->json($this->buildSessionPayload($session));
+        }
+
+        // Pour un admin / manager : toutes les sessions ouvertes + filtre optionnel par caissier
+        $openSessions = CashSession::where('restaurant_id', $user->restaurant_id)
             ->whereNull('closed_at')
             ->with('user:id,first_name,last_name')
-            ->latest()
-            ->first();
+            ->latest('opened_at')
+            ->get();
 
-        if (!$session) return response()->json(null);
+        $mySession = $openSessions->firstWhere('user_id', $user->id);
 
+        $openSummaries = $openSessions->map(function ($s) {
+            $payload = $this->buildSessionPayload($s);
+            return array_merge($payload, ['id' => $s->id, 'user_id' => $s->user_id]);
+        })->values();
+
+        // Si un caissier précis est demandé
+        if ($requestedUserId && $requestedUserId !== 'all') {
+            $targetSession = $openSessions->firstWhere('user_id', (int) $requestedUserId);
+            if (!$targetSession) {
+                return response()->json([
+                    'session'       => null,
+                    'my_session'    => $mySession,
+                    'open_sessions' => $openSummaries,
+                    'is_aggregated' => false,
+                ]);
+            }
+
+            $payload = $this->buildSessionPayload($targetSession);
+            $payload['my_session'] = $mySession;
+            $payload['open_sessions'] = $openSummaries;
+            $payload['is_aggregated'] = false;
+            return response()->json($payload);
+        }
+
+        // Vue d'ensemble (Tous les caissiers)
+        if ($openSessions->isEmpty()) {
+            return response()->json([
+                'session'       => null,
+                'my_session'    => null,
+                'open_sessions' => [],
+                'is_aggregated' => true,
+            ]);
+        }
+
+        $aggTotals = [
+            'cash'               => 0.0,
+            'grand_total'        => 0.0,
+            'gozem_orders_total' => 0.0,
+            'cake_orders_total'  => 0.0,
+        ];
+        $aggOpening = 0.0;
+        $aggExpenses = 0.0;
+        $aggSales = 0.0;
+        $aggExpected = 0.0;
+        $aggOrdersCount = 0;
+
+        foreach ($openSummaries as $item) {
+            $aggOpening += (float) ($item['session']->opening_amount ?? 0);
+            $aggExpenses += (float) ($item['expenses_total'] ?? 0);
+            $aggSales += (float) ($item['session']->total_sales ?? 0);
+            $aggExpected += (float) ($item['session']->expected_amount ?? 0);
+            $aggOrdersCount += (int) ($item['orders_count'] ?? 0);
+            foreach ($item['totals'] as $method => $val) {
+                $aggTotals[$method] = round(($aggTotals[$method] ?? 0) + (float) $val, 2);
+            }
+        }
+
+        return response()->json([
+            'session'            => $openSessions->count() === 1 ? $openSummaries[0]['session'] : null,
+            'my_session'         => $mySession,
+            'open_sessions'      => $openSummaries,
+            'is_aggregated'      => true,
+            'payments_by_method' => $aggTotals,
+            'totals'             => $aggTotals,
+            'gozem_orders_total' => $aggTotals['gozem_orders_total'],
+            'cake_orders_total'  => $aggTotals['cake_orders_total'],
+            'orders_count'       => $aggOrdersCount,
+            'expenses_total'     => $aggExpenses,
+            'aggregated_summary' => [
+                'open_count'      => $openSessions->count(),
+                'opening_amount'  => $aggOpening,
+                'total_sales'     => $aggSales,
+                'total_expenses'  => $aggExpenses,
+                'expected_amount' => $aggExpected,
+            ],
+        ]);
+    }
+
+    private function buildSessionPayload(CashSession $session): array
+    {
         $totals = $this->computeTotals($session);
         $expensesTotal = Expense::where('cash_session_id', $session->id)->sum('amount');
 
-        // Ventes Vécues = Somme de TOUT (Physique + Gozem)
-        $session->total_sales = (float)$totals['grand_total'] + (float)$totals['gozem_orders_total'];
-        
-        // Total Attendu = Opening + Uniquement le Physique (grand_total) - Dépenses
-        $session->expected_amount = (float)$session->opening_amount + (float)$totals['grand_total'] - (float)$expensesTotal;
-        
-        $session->total_expenses = (float)$expensesTotal;
+        $session->total_sales = (float) $totals['grand_total'] + (float) $totals['gozem_orders_total'];
+        $session->expected_amount = (float) $session->opening_amount + (float) $totals['grand_total'] - (float) $expensesTotal;
+        $session->total_expenses = (float) $expensesTotal;
 
-        return response()->json([
+        return [
             'session'            => $session,
             'payments_by_method' => $totals,
             'totals'             => $totals,
             'gozem_orders_total' => $totals['gozem_orders_total'] ?? 0,
             'cake_orders_total'  => $totals['cake_orders_total'] ?? 0,
-            'orders_count'       => Payment::where('cash_session_id', $session->id)->distinct('order_id')->count() + Payment::where('cash_session_id', $session->id)->distinct('cake_order_id')->count(),
+            'orders_count'       => Payment::where('cash_session_id', $session->id)->whereNotNull('order_id')->distinct('order_id')->count('order_id')
+                                    + Payment::where('cash_session_id', $session->id)->whereNotNull('cake_order_id')->distinct('cake_order_id')->count('cake_order_id'),
             'expenses_total'     => $expensesTotal,
-        ]);
+        ];
     }
 
     /** Ouvrir une session de caisse */
     public function open(Request $request)
     {
-        $existing = CashSession::where('restaurant_id', $request->user()->restaurant_id)
-            ->whereNull('closed_at')->exists();
-        abort_if($existing, 422, 'Une session de caisse est déjà ouverte.');
+        $request->validate([
+            'opening_amount' => 'required|numeric|min:0',
+            'user_id'        => 'nullable|integer|exists:users,id',
+        ]);
 
-        $request->validate(['opening_amount' => 'required|numeric|min:0']);
+        $actor = $request->user();
+        $targetUserId = $actor->id;
+
+        if ($request->filled('user_id') && (int) $request->user_id !== (int) $actor->id) {
+            abort_unless($actor->isManager(), 403, 'Seul un Admin ou Manager peut ouvrir la caisse d\'un autre caissier.');
+            $targetUser = \App\Models\User::where('restaurant_id', $actor->restaurant_id)
+                ->findOrFail((int) $request->user_id);
+            $targetUserId = $targetUser->id;
+        }
+
+        $existing = CashSession::where('restaurant_id', $actor->restaurant_id)
+            ->where('user_id', $targetUserId)
+            ->whereNull('closed_at')
+            ->exists();
+        abort_if($existing, 422, $targetUserId === $actor->id
+            ? 'Vous avez déjà une session de caisse ouverte.'
+            : 'Ce caissier a déjà une session de caisse ouverte.');
 
         $session = CashSession::create([
-            'restaurant_id'  => $request->user()->restaurant_id,
-            'user_id'        => $request->user()->id,
+            'restaurant_id'  => $actor->restaurant_id,
+            'user_id'        => $targetUserId,
             'opening_amount' => $request->opening_amount,
             'opened_at'      => now(),
         ]);
@@ -74,6 +187,9 @@ class CashSessionController extends Controller
         abort_if($session->restaurant_id !== $request->user()->restaurant_id, 403);
         abort_if((bool) $session->closed_at, 422, 'Session déjà fermée.');
         abort_unless($request->user()->hasRole(['admin', 'manager', 'cashier']), 403, 'Permission requise pour fermer la caisse.');
+        if (!$request->user()->isManager()) {
+            abort_if((int) $session->user_id !== (int) $request->user()->id, 403, 'Vous ne pouvez clôturer que votre propre session de caisse.');
+        }
 
         $request->validate([
             'amount_to_bank'   => 'required|numeric|min:0',
@@ -185,9 +301,13 @@ class CashSessionController extends Controller
     /** Historique des sessions */
     public function index(Request $request)
     {
+        $user = $request->user();
+
         $sessions = CashSession::with('user:id,first_name,last_name')
             ->withSum('payments', 'amount')
-            ->where('restaurant_id', $request->user()->restaurant_id)
+            ->where('restaurant_id', $user->restaurant_id)
+            ->when(!$user->isManager(), fn($q) => $q->where('user_id', $user->id))
+            ->when($user->isManager() && $request->filled('user_id') && $request->user_id !== 'all', fn($q) => $q->where('user_id', (int) $request->user_id))
             ->when($request->date, fn($q) => $q->whereDate('opened_at', $request->date))
             ->latest('opened_at')
             ->paginate(20);
